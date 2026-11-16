@@ -22,6 +22,7 @@ public static class DownloadRequestEndpoints
     public static void MapDownloadRequestEndpoints(this IEndpointRouteBuilder app)
     {
         var mine = app.MapGroup("/api/requests").RequireAuthorization(AuthConstants.ContributorPolicy).WithTags("Requests");
+        mine.MapCatalogEndpoints();
 
         mine.MapGet("/search", async (string q, bool? music, YtDlp ytDlp, SonNuageDbContext db, CancellationToken ct) =>
         {

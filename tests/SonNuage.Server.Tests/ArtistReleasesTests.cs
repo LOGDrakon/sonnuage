@@ -122,6 +122,15 @@ public sealed class ReleasesFactory : SonNuageFactory
             ("lb.test", "/1/explore/fresh-releases/") =>
                 $$$"""{"payload":{"releases":[{"artist_credit_name":"Test Artist","artist_mbids":["{{{TestArtistMbid}}}"],"release_date":"{{{Day(-3)}}}","release_group_mbid":"{{{FreshEpGroup}}}","release_group_primary_type":"EP","release_group_secondary_type":null,"release_name":"Fresh EP"},{"artist_credit_name":"Inconnu","artist_mbids":["99999999-9999-4999-8999-999999999999"],"release_date":"{{{Day(-1)}}}","release_group_mbid":"{{{Guid.NewGuid()}}}","release_group_primary_type":"Album","release_name":"Ailleurs"}]}}""",
             // Deezer : « New Album » de « Test Artist » et ses deux titres ; rien pour les autres parutions.
+            // Recherche dans le catalogue : « tout test » trouve des titres, albums et artistes, présents ou non.
+            ("dz.test", "/search/track") when query.Contains("tout test") =>
+                """{"data":[{"id":1,"title":"Second Song","title_short":"Second Song","duration":181,"artist":{"id":5,"name":"Test Artist"},"album":{"id":80,"title":"First Album","cover_medium":"https://cdn-images.dzcdn.net/images/cover/a/250x250.jpg"}},{"id":2,"title":"Unknown Song (Radio Edit)","title_short":"Unknown Song","duration":200,"artist":{"id":5,"name":"Test Artist"},"album":{"id":81,"title":"Other Album"}}]}""",
+            ("dz.test", "/search/album") when query.Contains("tout test") =>
+                """{"data":[{"id":80,"title":"First Album (Deluxe Edition)","nb_tracks":14,"record_type":"album","cover_medium":"https://cdn-images.dzcdn.net/images/cover/a/250x250.jpg","artist":{"id":5,"name":"Test Artist"}},{"id":82,"title":"Brand New","nb_tracks":10,"record_type":"album","artist":{"id":5,"name":"Test Artist"}}]}""",
+            ("dz.test", "/search/artist") when query.Contains("tout test") =>
+                """{"data":[{"id":5,"name":"Test Artist","nb_album":4,"picture_medium":"https://cdn-images.dzcdn.net/images/artist/b/250x250.jpg"},{"id":6,"name":"Test Artist Tribute","nb_album":1}]}""",
+            ("dz.test", "/artist/5/albums") =>
+                """{"data":[{"id":82,"title":"Brand New","release_date":"2024-05-03","record_type":"album","nb_tracks":10},{"id":80,"title":"First Album","release_date":"2001-03-12","record_type":"album","cover_medium":"https://cdn-images.dzcdn.net/images/cover/a/250x250.jpg"},{"id":83,"title":"A Single","release_date":"2023-01-01","record_type":"single"}]}""",
             ("dz.test", "/search/album") when query.Contains("New Album") =>
                 """{"data":[{"id":77,"title":"New Album","artist":{"name":"Test Artist"}}]}""",
             ("dz.test", "/search/album") => """{"data":[]}""",
@@ -300,6 +309,39 @@ public sealed class ArtistReleasesTests(ReleasesFactory factory) : IClassFixture
         await AccountAsync(admin, "release-preview-user", Roles.User);
         var user = await SonNuageFactory.LoginAsync(factory.CreateClient(), "release-preview-user", "password-1234");
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"{Url(ReleasesFactory.NewAlbumGroup)}?t={user.MediaToken}", Ct)).StatusCode);
+    }
+
+    [Fact]
+    public async Task A_contributor_searches_the_catalog_and_sees_what_is_already_here()
+    {
+        var admin = await factory.ReadyAsync();
+        var contributor = await AccountAsync(admin, "catalog-contrib", Roles.Contributor);
+
+        var found = (await contributor.GetFromJsonAsync<CatalogSearchDto>("/api/requests/catalog?q=tout%20test", Ct))!;
+
+        Assert.Equal(
+            [new CatalogTrackDto("Test Artist", "Second Song", "First Album", 181, "https://cdn-images.dzcdn.net/images/cover/a/250x250.jpg", true),
+             new CatalogTrackDto("Test Artist", "Unknown Song", "Other Album", 200, null, false)],
+            found.Tracks);
+        // Une édition « Deluxe » d'un album présent compte comme présente.
+        Assert.Equal(
+            [new CatalogAlbumDto(80, "Test Artist", "First Album (Deluxe Edition)", null, "album", 14, "https://cdn-images.dzcdn.net/images/cover/a/250x250.jpg", true),
+             new CatalogAlbumDto(82, "Test Artist", "Brand New", null, "album", 10, null, false)],
+            found.Albums);
+        Assert.Equal(
+            [new CatalogArtistDto(5, "Test Artist", 4, "https://cdn-images.dzcdn.net/images/artist/b/250x250.jpg", true),
+             new CatalogArtistDto(6, "Test Artist Tribute", 1, null, false)],
+            found.Artists);
+
+        // La discographie d'un artiste, la plus récente d'abord.
+        var albums = (await contributor.GetFromJsonAsync<List<CatalogAlbumDto>>("/api/requests/catalog/artists/5/albums?name=Test%20Artist", Ct))!;
+        Assert.Equal(["Brand New", "A Single", "First Album"], albums.Select(a => a.Title));
+        Assert.Equal([false, false, true], albums.Select(a => a.InLibrary));
+        Assert.Equal(["2024", "2023", "2001"], albums.Select(a => a.Year));
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await contributor.GetAsync("/api/requests/catalog?q=%20", Ct)).StatusCode);
+        var user = await AccountAsync(admin, "catalog-user", Roles.User);
+        Assert.Equal(HttpStatusCode.Forbidden, (await user.GetAsync("/api/requests/catalog?q=tout%20test", Ct)).StatusCode);
     }
 
     [Fact]

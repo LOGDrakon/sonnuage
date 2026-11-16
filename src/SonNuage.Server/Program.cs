@@ -353,7 +353,7 @@ static Task SecurityHeaders(HttpContext http, Func<Task> next)
         // Miniatures YouTube affichées dans l'import (admin).
         h.ContentSecurityPolicy =
             "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
-            "img-src 'self' data: blob: https://i.ytimg.com https://*.googleusercontent.com https://*.ggpht.com; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'";
+            "img-src 'self' data: blob: https://*.dzcdn.net https://i.ytimg.com https://*.googleusercontent.com https://*.ggpht.com; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'";
     }
     return next();
 }

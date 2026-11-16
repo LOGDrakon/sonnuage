@@ -1373,6 +1373,32 @@
     "modeLabel": "Type de recherche",
     "modeMatch": "Artiste et titre",
     "modeFree": "Recherche libre",
+    "modeCatalog": "Catalogue",
+    "catalogPlaceholder": "Titre, album ou artiste",
+    "catalogHint": "Choisissez un titre, un album ou un artiste du catalogue : le serveur trouve ensuite la bonne vidéo sur YouTube Music ou YouTube.",
+    "catalogTracks": "Titres",
+    "catalogAlbums": "Albums",
+    "catalogArtists": "Artistes",
+    "catalogFind": "Trouver",
+    "catalogFindHint": "Chercher la vidéo de ce titre et la noter",
+    "catalogAlbum": "Tout l'album",
+    "catalogDiscography": "Discographie",
+    "catalogBack": "Retour aux résultats",
+    "catalogEmpty": "Rien dans le catalogue pour cette recherche.",
+    "catalogAlbumCount": {
+      "one": "{count} album",
+      "other": "{count} albums"
+    },
+    "catalogTrackCount": {
+      "one": "{count} titre",
+      "other": "{count} titres"
+    },
+    "catalogType": {
+      "album": "Album",
+      "ep": "EP",
+      "single": "Single",
+      "compile": "Compilation"
+    },
     "artist": "Artiste",
     "songTitle": "Titre du morceau",
     "matchSearch": "Trouver",

@@ -117,6 +117,8 @@ window.sonnuage = {
     update();
   },
   setTheme: applyTheme,
+  // Amène un élément en haut de la vue (par exemple l'en-tête d'une liste qui vient de remplacer une autre).
+  reveal: el => el && el.scrollIntoView({ block: 'start' }),
   // Paroles : la ligne en cours au milieu de la liste, sans faire défiler le reste de la page.
   scrollLyric: (list, index) => {
     const line = list && list.children[index];

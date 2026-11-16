@@ -49,7 +49,19 @@ public sealed record DownloadRequestDto(
 /// <summary>Limit : null pour un administrateur (pas de quota).</summary>
 public sealed record RequestQuotaDto(int Used, int? Limit, bool AutoApproved);
 
-/// <summary>Un résultat YouTube noté sur 100 pour « artiste + titre ».</summary>
+/// <summary>
+/// Recherche dans le catalogue (Deezer) : on choisit un titre, un album ou un artiste, la vidéo est trouvée ensuite.
+/// InLibrary : déjà sur le serveur (même artiste, même titre, édition comprise).
+/// </summary>
+public sealed record CatalogSearchDto(IReadOnlyList<CatalogTrackDto> Tracks, IReadOnlyList<CatalogAlbumDto> Albums, IReadOnlyList<CatalogArtistDto> Artists);
+
+public sealed record CatalogTrackDto(string Artist, string Title, string? Album, double? DurationSeconds, string? CoverUrl, bool InLibrary);
+
+/// <summary>Type : album, ep, single ou compile (Deezer) ; Year : connue dans une discographie seulement.</summary>
+public sealed record CatalogAlbumDto(long Id, string Artist, string Title, string? Year, string? Type, int? TrackCount, string? CoverUrl, bool InLibrary);
+
+public sealed record CatalogArtistDto(long Id, string Name, int? AlbumCount, string? PictureUrl, bool InLibrary);
+
 /// <summary>Demande d'un album entier : ses titres sont cherchés sur YouTube puis demandés un par un, en tâche de fond.</summary>
 public sealed record CreateAlbumRequest(string Artist, string Album);
 

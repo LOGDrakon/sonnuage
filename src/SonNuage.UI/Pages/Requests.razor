@@ -2,6 +2,7 @@
 @inject ApiClient Api
 @inject AuthSession Auth
 @inject UiState Ui
+@inject IJSRuntime JS
 
 <PageTitle>@L["requests.title"] · SonNuage</PageTitle>
 
@@ -25,12 +26,21 @@
                 }
             </p>
             <div class="segmented request-mode" role="group" aria-label="@L["requests.modeLabel"]">
-                <button type="button" class="@(_byMatch ? "on" : null)" @onclick="() => _byMatch = true">@L["requests.modeMatch"]</button>
-                <button type="button" class="@(!_byMatch ? "on" : null)" @onclick="() => _byMatch = false">@L["requests.modeFree"]</button>
+                <button type="button" class="@(_mode == Mode.Catalog ? "on" : null)" @onclick="() => _mode = Mode.Catalog">@L["requests.modeCatalog"]</button>
+                <button type="button" class="@(_mode == Mode.Match ? "on" : null)" @onclick="() => _mode = Mode.Match">@L["requests.modeMatch"]</button>
+                <button type="button" class="@(_mode == Mode.Free ? "on" : null)" @onclick="() => _mode = Mode.Free">@L["requests.modeFree"]</button>
             </div>
-            @if (_byMatch)
+            @if (_mode == Mode.Catalog)
             {
-                <form class="inline-form" @onsubmit="MatchAsync" @onsubmit:preventDefault="true">
+                <form class="inline-form" @onsubmit="CatalogAsync" @onsubmit:preventDefault="true">
+                    <input class="input" placeholder="@L["requests.catalogPlaceholder"]" @bind="_catalogQuery" aria-label="@L["requests.catalogPlaceholder"]" />
+                    <button class="btn primary" type="submit" disabled="@(_searching || string.IsNullOrWhiteSpace(_catalogQuery))"><Icon Name="search" Size="18" /> @L["yt.explore.search"]</button>
+                </form>
+                <p class="muted small">@L["requests.catalogHint"]</p>
+            }
+            else if (_mode == Mode.Match)
+            {
+                <form class="inline-form" @onsubmit="TypedMatchAsync" @onsubmit:preventDefault="true">
                     <input class="input" placeholder="@L["requests.artist"]" @bind="_artist" aria-label="@L["requests.artist"]" />
                     <input class="input" placeholder="@L["requests.songTitle"]" @bind="_title" aria-label="@L["requests.songTitle"]" />
                     <button class="btn primary" type="submit" disabled="@(_searching || string.IsNullOrWhiteSpace(_artist) || string.IsNullOrWhiteSpace(_title))"><Icon Name="search" Size="18" /> @L["requests.matchSearch"]</button>
@@ -54,7 +64,78 @@
             {
                 <div class="empty"><Logo Size="16" Animated="true" /> @L["yt.explore.searching"]</div>
             }
-            else if (_byMatch && _match is { } match)
+            else if (_mode == Mode.Catalog && _discography is { } disco)
+            {
+                <div class="catalog-head" @ref="_head">
+                    <button class="btn compact" @onclick="() => _discography = null"><Icon Name="arrow-back" Size="16" /> @L["requests.catalogBack"]</button>
+                    <h3>@disco.Artist.Name · @L["requests.catalogDiscography"]</h3>
+                </div>
+                @if (disco.Albums is null)
+                {
+                    <div class="empty"><Logo Size="16" Animated="true" /> @L["yt.explore.searching"]</div>
+                }
+                else
+                {
+                    <ul class="yt-list requests catalog">
+                        @foreach (var a in disco.Albums) { @AlbumRow(a) }
+                    </ul>
+                }
+            }
+            else if (_mode == Mode.Catalog && _catalog is { } catalog)
+            {
+                @if (catalog.Tracks.Count + catalog.Albums.Count + catalog.Artists.Count == 0)
+                {
+                    <p class="muted">@L["requests.catalogEmpty"]</p>
+                }
+                @if (catalog.Tracks.Count > 0)
+                {
+                    <h3 class="catalog-title">@L["requests.catalogTracks"]</h3>
+                    <ul class="yt-list requests catalog">
+                        @foreach (var t in catalog.Tracks)
+                        {
+                            <li class="@(t.InLibrary ? "known" : null)">
+                                @Cover(t.CoverUrl, "album")
+                                <span class="grow">
+                                    <span class="strong">@t.Title</span>
+                                    <span class="muted small block">@t.Artist@(t.Album is { } al ? $" · {al}" : "")@(t.DurationSeconds is { } dur ? $" · {Format.Duration(dur)}" : "")</span>
+                                </span>
+                                <span class="row-actions">
+                                    @if (t.InLibrary) { <span class="badge good">@L["requests.onServer"]</span> }
+                                    <button class="btn compact @(t.InLibrary ? null : "primary")" title="@L["requests.catalogFindHint"]" @onclick="() => FindAsync(t)"><Icon Name="search" Size="16" /> @L["requests.catalogFind"]</button>
+                                </span>
+                            </li>
+                        }
+                    </ul>
+                }
+                @if (catalog.Albums.Count > 0)
+                {
+                    <h3 class="catalog-title">@L["requests.catalogAlbums"]</h3>
+                    <ul class="yt-list requests catalog">
+                        @foreach (var a in catalog.Albums) { @AlbumRow(a) }
+                    </ul>
+                }
+                @if (catalog.Artists.Count > 0)
+                {
+                    <h3 class="catalog-title">@L["requests.catalogArtists"]</h3>
+                    <ul class="yt-list requests catalog">
+                        @foreach (var artist in catalog.Artists)
+                        {
+                            <li>
+                                @Cover(artist.PictureUrl, "artist", round: true)
+                                <span class="grow">
+                                    <span class="strong">@artist.Name</span>
+                                    @if (artist.AlbumCount is { } n) { <span class="muted small block">@L["requests.catalogAlbumCount", ("count", n)]</span> }
+                                </span>
+                                <span class="row-actions">
+                                    @if (artist.InLibrary) { <span class="badge good">@L["requests.onServer"]</span> }
+                                    <button class="btn compact" @onclick="() => DiscographyAsync(artist)"><Icon Name="album" Size="16" /> @L["requests.catalogDiscography"]</button>
+                                </span>
+                            </li>
+                        }
+                    </ul>
+                }
+            }
+            else if (_mode == Mode.Match && _match is { } match)
             {
                 <p class="match-summary">
                     @if (match.Candidates.Count == 0)
@@ -81,7 +162,7 @@
                     }
                 </ul>
             }
-            else if (!_byMatch && _results is { } results)
+            else if (_mode == Mode.Free && _results is { } results)
             {
                 @if (results.Entries.Count == 0)
                 {
@@ -118,7 +199,16 @@
     private const int Page = 50;
     private string _query = "";
     private bool _music = true;
-    private bool _byMatch = true;
+    private enum Mode { Catalog, Match, Free }
+    private Mode _mode = Mode.Catalog;
+    private string _catalogQuery = "";
+    private CatalogSearchDto? _catalog;
+    private (CatalogArtistDto Artist, List<CatalogAlbumDto>? Albums)? _discography;
+    private readonly HashSet<long> _albumsAsked = [];
+    // Durée connue par le catalogue pour le titre cherché ; sinon le serveur la demande à MusicBrainz.
+    private double? _duration;
+    private ElementReference _head;
+    private bool _revealHead;
     private string _artist = "";
     private string _title = "";
     private MatchResultDto? _match;
@@ -138,7 +228,7 @@
         if (!Auth.CanRequest) return;
         if (!string.IsNullOrWhiteSpace(ArtistQuery) && !string.IsNullOrWhiteSpace(TitleQuery))
         {
-            _byMatch = true;
+            _mode = Mode.Match;
             _artist = ArtistQuery;
             _title = TitleQuery;
             _ = InvokeAsync(async () =>
@@ -154,6 +244,13 @@
             _mine = page?.Items.ToList() ?? [];
             _total = page?.Total ?? 0;
         });
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_revealHead || _discography is null) return;
+        _revealHead = false;
+        await JS.InvokeVoidAsync("sonnuage.reveal", _head);
     }
 
     private async Task SearchAsync()
@@ -203,9 +300,97 @@
         if (string.IsNullOrWhiteSpace(_artist) || string.IsNullOrWhiteSpace(_title)) return;
         _searching = true;
         _match = null;
-        await RunAsync(async () => _match = await Api.RequestMatchAsync(_artist.Trim(), _title.Trim()));
+        await RunAsync(async () => _match = await Api.RequestMatchAsync(_artist.Trim(), _title.Trim(), _duration));
         _searching = false;
     }
+
+    // Artiste et titre tapés à la main : pas de durée connue.
+    private Task TypedMatchAsync()
+    {
+        _duration = null;
+        return MatchAsync();
+    }
+
+    private async Task CatalogAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_catalogQuery)) return;
+        _searching = true;
+        _catalog = null;
+        _discography = null;
+        await RunAsync(async () => _catalog = await Api.CatalogSearchAsync(_catalogQuery.Trim()));
+        _searching = false;
+    }
+
+    /// <summary>Un titre du catalogue : recherche par correspondance, avec la durée du catalogue.</summary>
+    private Task FindAsync(CatalogTrackDto track)
+    {
+        _mode = Mode.Match;
+        _artist = track.Artist;
+        _title = track.Title;
+        _duration = track.DurationSeconds;
+        return MatchAsync();
+    }
+
+    private async Task DiscographyAsync(CatalogArtistDto artist)
+    {
+        _discography = (artist, null);
+        _revealHead = true;
+        await RunAsync(async () => _discography = (artist, await Api.CatalogArtistAlbumsAsync(artist.Id, artist.Name) ?? []));
+        _revealHead = true;
+    }
+
+    private async Task AskAlbumAsync(CatalogAlbumDto album)
+    {
+        _sending = $"album-{album.Id}";
+        await RunAsync(async () =>
+        {
+            await Api.RequestAlbumAsync(new CreateAlbumRequest(album.Artist, album.Title));
+            _albumsAsked.Add(album.Id);
+            Ui.Notify(L["discover.albumSent", ("album", album.Title)]);
+        });
+        _sending = null;
+    }
+
+    private RenderFragment AlbumRow(CatalogAlbumDto a) => __builder =>
+    {
+        var details = new List<string> { a.Artist };
+        if (a.Type is { } type && type != "album") details.Add(L[$"requests.catalogType.{type}"]);
+        if (a.Year is { } year) details.Add(year);
+        if (a.TrackCount is { } n) details.Add(L["requests.catalogTrackCount", ("count", n)]);
+        <li @key="a.Id" class="@(a.InLibrary ? "known" : null)">
+            @Cover(a.CoverUrl, "album")
+            <span class="grow">
+                <span class="strong">@a.Title</span>
+                <span class="muted small block">@string.Join(" · ", details)</span>
+            </span>
+            <span class="row-actions">
+                @if (a.InLibrary)
+                {
+                    <span class="badge good">@L["requests.onServer"]</span>
+                }
+                else if (_albumsAsked.Contains(a.Id))
+                {
+                    <span class="badge info">@L["requests.asked"]</span>
+                }
+                else
+                {
+                    <button class="btn compact primary" disabled="@(_sending is not null)" @onclick="() => AskAlbumAsync(a)"><Icon Name="album" Size="16" /> @L["requests.catalogAlbum"]</button>
+                }
+            </span>
+        </li>
+    };
+
+    private static RenderFragment Cover(string? url, string icon, bool round = false) => __builder =>
+    {
+        if (url is null)
+        {
+            <span class="catalog-cover placeholder @(round ? "round" : null)"><Icon Name="@icon" Size="22" /></span>
+        }
+        else
+        {
+            <img class="catalog-cover @(round ? "round" : null)" src="@url" alt="" loading="lazy" />
+        }
+    };
 
     private async Task AskAsync(YoutubeVideoDto video)
     {
@@ -213,7 +398,7 @@
         await RunAsync(async () =>
         {
             // Résultats YouTube Music sans chaîne : en recherche par correspondance, l'artiste demandé la remplace.
-            var channel = video.Channel ?? (_byMatch && !string.IsNullOrWhiteSpace(_artist) ? _artist.Trim() : null);
+            var channel = video.Channel ?? (_mode == Mode.Match && !string.IsNullOrWhiteSpace(_artist) ? _artist.Trim() : null);
             if (await Api.CreateRequestAsync(new CreateDownloadRequest(video.VideoId, video.Title, channel, video.DurationSeconds, null)) is { } created)
             {
                 _asked.Add(video.VideoId);
