@@ -973,3 +973,8 @@ pre.mono { white-space: pre-wrap; word-break: break-all; background: var(--log-b
 @media (max-width: 640px) {
     .yt-list.requests.catalog .row-actions { padding-left: calc(54px + .8rem); }
 }
+.catalog-filters { display: flex; flex-wrap: wrap; gap: .4rem; margin: .8rem 0 .2rem; }
+.check-pill { display: inline-flex; align-items: center; gap: .4rem; padding: .3rem .7rem; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; font-size: .9rem; }
+.check-pill > input { width: 1rem; height: 1rem; margin: 0; accent-color: var(--accent); }
+.check-pill:has(input:checked) { border-color: var(--accent); }
+.check-pill.empty { opacity: .55; }

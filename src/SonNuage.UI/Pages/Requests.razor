@@ -76,8 +76,14 @@
                 }
                 else
                 {
+                    <div class="catalog-filters" role="group" aria-label="@L["requests.catalogFilter"]">
+                        @foreach (var type in TypesOf(disco.Albums))
+                        {
+                            @Filter(TypeLabel(type), disco.Albums.Count(a => TypeOf(a) == type), _hiddenTypes, type)
+                        }
+                    </div>
                     <ul class="yt-list requests catalog">
-                        @foreach (var a in disco.Albums) { @AlbumRow(a) }
+                        @foreach (var a in disco.Albums.Where(a => !_hiddenTypes.Contains(TypeOf(a)))) { @AlbumRow(a) }
                     </ul>
                 }
             }
@@ -87,7 +93,15 @@
                 {
                     <p class="muted">@L["requests.catalogEmpty"]</p>
                 }
-                @if (catalog.Tracks.Count > 0)
+                else
+                {
+                    <div class="catalog-filters" role="group" aria-label="@L["requests.catalogFilter"]">
+                        @Filter(L["requests.catalogTracks"], catalog.Tracks.Count, _hiddenKinds, KindTracks)
+                        @Filter(L["requests.catalogAlbums"], catalog.Albums.Count, _hiddenKinds, KindAlbums)
+                        @Filter(L["requests.catalogArtists"], catalog.Artists.Count, _hiddenKinds, KindArtists)
+                    </div>
+                }
+                @if (catalog.Tracks.Count > 0 && !_hiddenKinds.Contains(KindTracks))
                 {
                     <h3 class="catalog-title">@L["requests.catalogTracks"]</h3>
                     <ul class="yt-list requests catalog">
@@ -107,14 +121,14 @@
                         }
                     </ul>
                 }
-                @if (catalog.Albums.Count > 0)
+                @if (catalog.Albums.Count > 0 && !_hiddenKinds.Contains(KindAlbums))
                 {
                     <h3 class="catalog-title">@L["requests.catalogAlbums"]</h3>
                     <ul class="yt-list requests catalog">
                         @foreach (var a in catalog.Albums) { @AlbumRow(a) }
                     </ul>
                 }
-                @if (catalog.Artists.Count > 0)
+                @if (catalog.Artists.Count > 0 && !_hiddenKinds.Contains(KindArtists))
                 {
                     <h3 class="catalog-title">@L["requests.catalogArtists"]</h3>
                     <ul class="yt-list requests catalog">
@@ -208,6 +222,11 @@
     // Durée connue par le catalogue pour le titre cherché ; sinon le serveur la demande à MusicBrainz.
     private double? _duration;
     private ElementReference _head;
+    private const string KindTracks = "tracks", KindAlbums = "albums", KindArtists = "artists";
+    // Cases décochées : gardées d'une recherche (et d'un artiste) à l'autre.
+    private readonly HashSet<string> _hiddenKinds = [];
+    private readonly HashSet<string> _hiddenTypes = [];
+    private static readonly string[] KnownTypes = ["album", "ep", "single", "compile"];
     private bool _revealHead;
     private string _artist = "";
     private string _title = "";
@@ -378,6 +397,23 @@
                 }
             </span>
         </li>
+    };
+
+    private static string TypeOf(CatalogAlbumDto a) => string.IsNullOrWhiteSpace(a.Type) ? "other" : a.Type;
+
+    // Tous les types de Deezer, même absents de cette discographie, puis ceux qu'il ajouterait.
+    private static IEnumerable<string> TypesOf(IEnumerable<CatalogAlbumDto> albums) =>
+        KnownTypes.Concat(albums.Select(TypeOf).Distinct().Except(KnownTypes).Order());
+
+    private string TypeLabel(string type) => KnownTypes.Contains(type) ? L[$"requests.catalogType.{type}"] : type == "other" ? L["requests.catalogType.other"] : type;
+
+    private RenderFragment Filter(string label, int count, HashSet<string> hidden, string key) => __builder =>
+    {
+        <label class="check-pill @(count == 0 ? "empty" : null)">
+            <input type="checkbox" checked="@(!hidden.Contains(key))" @onchange="() => { if (!hidden.Remove(key)) hidden.Add(key); }" />
+            <span>@label</span>
+            <span class="muted small">@count</span>
+        </label>
     };
 
     private static RenderFragment Cover(string? url, string icon, bool round = false) => __builder =>

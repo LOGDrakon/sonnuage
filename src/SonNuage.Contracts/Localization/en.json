@@ -1385,6 +1385,7 @@
     "catalogDiscography": "Discography",
     "catalogBack": "Back to results",
     "catalogEmpty": "Nothing in the catalog for this search.",
+    "catalogFilter": "Show",
     "catalogAlbumCount": {
       "one": "{count} album",
       "other": "{count} albums"
@@ -1397,7 +1398,8 @@
       "album": "Album",
       "ep": "EP",
       "single": "Single",
-      "compile": "Compilation"
+      "compile": "Compilation",
+      "other": "Other"
     },
     "artist": "Artist",
     "songTitle": "Song title",
