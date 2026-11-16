@@ -124,8 +124,22 @@ public sealed class AnalysisOptions
     /// <summary>Script d'analyse. Vide : celui livré avec le serveur (Analysis/essentia_analyzer.py).</summary>
     public string? ScriptPath { get; set; }
 
-    /// <summary>Fils de calcul de TensorFlow.</summary>
-    public int Threads { get; set; } = 2;
+    /// <summary>
+    /// Processus d'analyse menés côte à côte, un fichier chacun. Vide : la moitié des cœurs, au plus <see cref="MaxAutoWorkers"/>
+    /// (chaque processus garde ses modèles en mémoire, environ 600 Mo).
+    /// </summary>
+    public int? Workers { get; set; }
+
+    public const int MaxAutoWorkers = 4;
+
+    /// <summary>Nombre de processus effectivement lancés.</summary>
+    public int EffectiveWorkers => Math.Max(1, Workers ?? Math.Clamp(Environment.ProcessorCount / 2, 1, MaxAutoWorkers));
+
+    /// <summary>
+    /// Fils de calcul de TensorFlow, par processus. Un seul suffit : le décodage et le tempo n'en utilisent qu'un, plusieurs
+    /// processus (<see cref="Workers"/>) occupent mieux les cœurs.
+    /// </summary>
+    public int Threads { get; set; } = 1;
 
     /// <summary>Priorité abaissée du processus d'analyse (nice), pour ne pas gêner la lecture.</summary>
     public int Niceness { get; set; } = 10;

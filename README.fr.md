@@ -147,8 +147,9 @@ minutes du milieu sont écoutées, sur deux fils de calcul en basse priorité : 
   avant d'avoir changé.
 - **Réglages → Analyse audio** : avancement, activation, lancement immédiat.
 - Livrée dans l'image Docker **amd64** uniquement (Python, `essentia-tensorflow` et ses modèles : environ 800 Mo de
-  plus sur disque, dans la base d'exécution). Le processus d'analyse occupe près de 1 Go de mémoire pendant qu'il
-  travaille et s'arrête après deux minutes sans morceau à analyser. Ailleurs
+  plus sur disque, dans la base d'exécution). Plusieurs processus d'analyse travaillent côte à côte, un fichier
+  chacun : la moitié des cœurs, au plus 4, ou `SonNuage__Analysis__Workers`. Chacun occupe de 600 Mo à 1 Go de
+  mémoire pendant qu'il travaille et s'arrête après deux minutes sans morceau à analyser. Ailleurs
   (arm64, développement sous Windows), l'analyse se déclare indisponible. Hors Docker :
   `SonNuage__Analysis__PythonPath` (Python où `essentia-tensorflow` est installé) et `SonNuage__Analysis__ModelsPath`
   (dossier des modèles, liste et empreintes dans le [Dockerfile](Dockerfile)).

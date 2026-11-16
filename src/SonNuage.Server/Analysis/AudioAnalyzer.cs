@@ -10,6 +10,9 @@ public interface IAudioAnalyzer
     /// <summary>L'analyseur est installé (Python, script et modèles présents). Ne démarre rien.</summary>
     bool Available { get; }
 
+    /// <summary>Fichiers que l'analyseur sait traiter en même temps (un par processus d'analyse).</summary>
+    int Parallelism => 1;
+
     Task<AudioAnalysisOutcome> AnalyzeAsync(string path, CancellationToken ct);
 }
 

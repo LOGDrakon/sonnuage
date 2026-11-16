@@ -16,6 +16,9 @@ namespace SonNuage.Server.Tests;
 public sealed class AudioAnalysisFactory : SonNuageFactory
 {
     public readonly ConcurrentQueue<string> Analyzed = new();
+    /// <summary>Plus grand nombre d'analyses menées en même temps.</summary>
+    public int MaxInFlight;
+    private int _inFlight;
 
     public AudioAnalysisFactory()
     {
@@ -31,15 +34,35 @@ public sealed class AudioAnalysisFactory : SonNuageFactory
     {
         public bool Available => true;
 
-        public Task<AudioAnalysisOutcome> AnalyzeAsync(string path, CancellationToken ct)
+        /// <summary>Deux fichiers à la fois, comme deux processus d'analyse.</summary>
+        public int Parallelism => 2;
+
+        public async Task<AudioAnalysisOutcome> AnalyzeAsync(string path, CancellationToken ct)
         {
             owner.Analyzed.Enqueue(Path.GetFileName(path));
+            var inFlight = Interlocked.Increment(ref owner._inFlight);
+            InterlockedMax(ref owner.MaxInFlight, inFlight);
+            try
+            {
+                // Le temps que l'autre analyse démarre.
+                await Task.Delay(50, ct);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref owner._inFlight);
+            }
             AudioAnalysisOutcome outcome = Path.GetFileName(path) == "Encore.wav"
                 ? new AudioAnalysisOutcome.Failed("RuntimeError: unreadable")
                 : new AudioAnalysisOutcome.Analyzed(new AudioFeatureValues(Bpm: 120, Danceability: 0.9, Energy: 0.8, Valence: 0.7,
                     Happy: 0.6, Sad: 0.1, Relaxed: 0.2, Aggressive: 0.3, Party: 0.5, Acoustic: 0.4, Electronic: 0.35, Instrumental: 0.05,
                     Styles: "Rock---Pop Rock:0.6|Pop---Ballad:0.2"));
-            return Task.FromResult(outcome);
+            return outcome;
+        }
+
+        private static void InterlockedMax(ref int target, int value)
+        {
+            for (var seen = target; value > seen; seen = target)
+                if (Interlocked.CompareExchange(ref target, value, seen) == seen) return;
         }
     }
 }
@@ -136,6 +159,7 @@ public sealed class AudioAnalysisTests(AudioAnalysisFactory factory) : IClassFix
     public async Task Tracks_just_added_go_first_then_the_backlog_whatever_its_age()
     {
         var admin = await ReadyAsync();
+        await IdleAsync(admin);
         var before = factory.Analyzed.Count;
 
         // Tout est à refaire. « Encore » vient d'arriver ; les deux autres sont anciens, et celui qui passe en premier
@@ -150,7 +174,19 @@ public sealed class AudioAnalysisTests(AudioAnalysisFactory factory) : IClassFix
         Assert.Equal(HttpStatusCode.Accepted, (await admin.PostAsync("/api/admin/analysis/run", null, Ct)).StatusCode);
         await IdleAsync(admin);
 
-        Assert.Equal(["Encore.wav", Path.GetFileName(old[0].FilePath), Path.GetFileName(old[1].FilePath)], factory.Analyzed.Skip(before));
+        // Un lot de deux, analysés ensemble : leur ordre entre eux ne compte pas.
+        var order = factory.Analyzed.Skip(before).ToList();
+        Assert.Equal(new[] { "Encore.wav", Path.GetFileName(old[0].FilePath) }.Order(), order.Take(2).Order());
+        Assert.Equal([Path.GetFileName(old[1].FilePath)], order.Skip(2));
+    }
+
+    [Fact]
+    public async Task The_files_of_a_batch_are_analyzed_side_by_side()
+    {
+        var admin = await ReadyAsync();
+        await IdleAsync(admin);
+
+        Assert.Equal(2, factory.MaxInFlight);
     }
 
     [Fact]

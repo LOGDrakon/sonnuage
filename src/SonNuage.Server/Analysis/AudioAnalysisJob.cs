@@ -37,20 +37,32 @@ public sealed class AudioAnalysisJob(IAudioAnalyzer analyzer, AudioAnalysisSetti
             .Select(t => new { t.Id, t.FilePath, t.FileModifiedUtc, t.ArtistName, t.Title })
             .Take(BatchSize).ToListAsync(ct);
 
+        // Les fichiers partent côte à côte, autant que l'analyseur a de processus ; les résultats sont enregistrés un par
+        // un (un seul contexte de base de données), chacun dès qu'il arrive.
         var failed = 0;
-        for (var i = 0; i < batch.Count; i++)
+        var saved = 0;
+        using var save = new SemaphoreSlim(1, 1);
+        var parallel = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, analyzer.Parallelism), CancellationToken = ct };
+        await Parallel.ForEachAsync(batch, parallel, async (t, token) =>
         {
             EnsureEnabled();
-            var t = batch[i];
-            var outcome = await analyzer.AnalyzeAsync(t.FilePath, ct);
-            if (outcome is AudioAnalysisOutcome.Failed f)
+            var outcome = await analyzer.AnalyzeAsync(t.FilePath, token);
+            await save.WaitAsync(token);
+            try
             {
-                failed++;
-                ctx.Warn(Tx.Key("jobs.analysis.failed", ("track", Tx.Literal($"{t.ArtistName} - {t.Title}")), ("error", Tx.Literal(f.Error))));
+                if (outcome is AudioAnalysisOutcome.Failed f)
+                {
+                    failed++;
+                    ctx.Warn(Tx.Key("jobs.analysis.failed", ("track", Tx.Literal($"{t.ArtistName} - {t.Title}")), ("error", Tx.Literal(f.Error))));
+                }
+                await SaveAsync(db, t.Id, t.FileModifiedUtc, outcome, token);
+                ctx.Report(++saved / (double)batch.Count);
             }
-            await SaveAsync(db, t.Id, t.FileModifiedUtc, outcome, ct);
-            ctx.Report((i + 1.0) / batch.Count);
-        }
+            finally
+            {
+                save.Release();
+            }
+        });
         ctx.Info(Tx.Key("jobs.analysis.done", ("analyzed", batch.Count - failed), ("failed", failed)));
         // Les radios gardent leurs morceaux plusieurs heures : elles tiennent compte des nouvelles analyses dès ce lot.
         if (batch.Count > 0) ctx.Services.GetRequiredService<Radio.RadioStations>().Forget();
