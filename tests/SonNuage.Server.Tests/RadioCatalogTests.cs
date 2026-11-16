@@ -1,3 +1,4 @@
+using SonNuage.Server.Analysis;
 using SonNuage.Contracts;
 using SonNuage.Server.Radio;
 
@@ -233,6 +234,27 @@ public sealed class RadioCatalogTests
 
         Assert.Equal(3, ids.Count);
     }
+
+    [Fact]
+    public void The_radio_follows_the_sound_of_what_just_played()
+    {
+        // Deux familles de morceaux aussi bien notées par la station ; la dernière jouée est de la première.
+        var rng = new Random(3);
+        var near = Enumerable.Range(0, 10).Select(i => new RadioStations.Candidate(Track($"N{i}"), 0.8)).ToList();
+        var far = Enumerable.Range(0, 10).Select(i => new RadioStations.Candidate(Track($"F{i}"), 0.8)).ToList();
+        var played = Track("Played");
+        var prints = new Dictionary<Guid, SoundPrint> { [played.Id] = Sound(1, 0, rng) };
+        foreach (var c in near) prints[c.Profile.Id] = Sound(1, 0, rng);
+        foreach (var c in far) prints[c.Profile.Id] = Sound(0, 1, rng);
+
+        var ids = RadioStations.Pick([.. near, .. far], new HashSet<Guid> { played.Id }, 6, new Random(4),
+            SoundSpace.Create(prints), played.Id);
+
+        Assert.All(ids, id => Assert.Contains(near, c => c.Profile.Id == id));
+    }
+
+    private static SoundPrint Sound(float x, float y, Random rng) =>
+        SoundPrint.From([5 + x + 0.1f * rng.NextSingle(), 5 + y + 0.1f * rng.NextSingle(), 5 + 0.1f * rng.NextSingle()])!;
 
     private static List<TrackProfile> SadSongs(int count) => Enumerable.Range(0, count)
         .Select(i => Track($"S{i}", feel: new AudioFeel(Sad: 0.7 + 0.3 * i / count, Valence: 0.1, Energy: 0.1, Happy: 0.1, Party: 0.1))).ToList();

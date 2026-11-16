@@ -212,6 +212,21 @@ public sealed class EssentiaProtocolTests
     }
 
     [Fact]
+    public void The_sound_print_of_the_track_is_kept_for_the_radios()
+    {
+        var sound = SoundPrint.From([0.5f, -0.25f, 1f])!.ToBytes();
+        var line = $$$"""{"id": "s", "features": {"happy": 0.5, "sound": "{{{Convert.ToBase64String(sound)}}}"}}""";
+
+        var values = Assert.IsType<AudioAnalysisOutcome.Analyzed>(Assert.IsType<EssentiaProtocol.Result>(EssentiaProtocol.Parse(line)).Outcome).Values;
+        var row = new TrackAudioFeatures();
+        AudioAnalysis.Record(row, new AudioAnalysisOutcome.Analyzed(values), DateTime.UtcNow, DateTimeOffset.UtcNow);
+
+        Assert.Equal(sound, row.Sound);
+        Assert.Null(Assert.IsType<AudioAnalysisOutcome.Analyzed>(Assert.IsType<EssentiaProtocol.Result>(
+            EssentiaProtocol.Parse("""{"id": "s", "features": {"sound": "%%%"}}""")).Outcome).Values.Sound);
+    }
+
+    [Fact]
     public void Missing_or_out_of_range_values_are_left_empty()
     {
         var result = Assert.IsType<EssentiaProtocol.Result>(EssentiaProtocol.Parse("""{"id": "b", "features": {"happy": 1.5, "sad": -0.1, "bpm": null, "party": 1}}"""));

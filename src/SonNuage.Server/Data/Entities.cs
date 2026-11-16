@@ -269,8 +269,8 @@ public sealed class UserRating
 public sealed class TrackAudioFeatures
 {
     /// <summary>Version des modèles et du calcul : la monter fait réanalyser toute la bibliothèque.</summary>
-    /// <remarks>2 : styles Discogs (<see cref="Styles"/>).</remarks>
-    public const int CurrentVersion = 2;
+    /// <remarks>2 : styles Discogs (<see cref="Styles"/>). 3 : empreinte sonore (<see cref="Sound"/>).</remarks>
+    public const int CurrentVersion = 3;
     public const int MaxErrorLength = 500;
 
     public Guid TrackId { get; set; }
@@ -299,6 +299,8 @@ public sealed class TrackAudioFeatures
     public double? Instrumental { get; set; }
     /// <summary>Styles Discogs les plus probables (<see cref="Analysis.DiscogsStyles"/>).</summary>
     public string? Styles { get; set; }
+    /// <summary>Empreinte sonore (<see cref="Analysis.SoundPrint"/>) : les radios enchaînent des morceaux qui se ressemblent.</summary>
+    public byte[]? Sound { get; set; }
 }
 
 /// <summary>

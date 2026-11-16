@@ -1123,6 +1123,9 @@ namespace SonNuage.Server.Data.Migrations
                     b.Property<double?>("Sad")
                         .HasColumnType("REAL");
 
+                    b.Property<byte[]>("Sound")
+                        .HasColumnType("BLOB");
+
                     b.Property<string>("Styles")
                         .HasMaxLength(400)
                         .HasColumnType("TEXT");

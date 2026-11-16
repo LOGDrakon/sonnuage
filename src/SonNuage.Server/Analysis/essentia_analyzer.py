@@ -18,6 +18,7 @@ Usage : python -I essentia_analyzer.py --models /opt/analysis/models [--threads 
 """
 
 import argparse
+import base64
 import json
 import math
 import os
@@ -26,7 +27,7 @@ import sys
 import time
 
 # Version du calcul : à monter avec TrackAudioFeatures.CurrentVersion quand les modèles ou le calcul changent.
-VERSION = 2
+VERSION = 3
 SAMPLE_RATE = 16000
 TEMPO_SAMPLE_RATE = 11025
 MAX_SECONDS = 180.0
@@ -169,6 +170,8 @@ class Analyzer:
             raise RuntimeError(f"genre model gives {len(activations)} values for {len(self.styles)} styles")
         best = activations.argsort()[::-1][:TOP_STYLES]
         features["styles"] = [[self.styles[i], rounded(activations[i])] for i in best]
+        # Empreinte sonore : représentation EffNet moyenne, en demi-précision (petit-boutiste), pour les radios.
+        features["sound"] = base64.b64encode(embeddings.mean(axis=0).astype("<f2").tobytes()).decode("ascii")
         # Sorties emoMusic : (valence, éveil) par fenêtre.
         av = self.arousal_valence(self.musicnn(audio)).mean(axis=0)
         features["valence"] = rounded(to_unit(av[0]))

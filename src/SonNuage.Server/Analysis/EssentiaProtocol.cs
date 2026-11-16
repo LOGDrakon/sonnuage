@@ -54,7 +54,7 @@ public static class EssentiaProtocol
         var bpm = Number(f["bpm"]) is { } b && b is > 0 and <= MaxBpm ? b : (double?)null;
         return new AudioFeatureValues(bpm, Unit("danceability"), Unit("energy"), Unit("valence"), Unit("happy"), Unit("sad"),
             Unit("relaxed"), Unit("aggressive"), Unit("party"), Unit("acoustic"), Unit("electronic"), Unit("instrumental"),
-            Styles(f["styles"]));
+            Styles(f["styles"]), SoundPrint.FromBase64(Text(f["sound"]))?.ToBytes());
     }
 
     /// <summary>Paires [libellé, activation] ; ce qui n'en est pas une est écarté.</summary>

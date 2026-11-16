@@ -1,3 +1,4 @@
+using SonNuage.Server.Analysis;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using SonNuage.Contracts;
@@ -32,9 +33,11 @@ public sealed class RadioStations(IMemoryCache cache, IWeatherSource weather, Ti
     private static readonly TimeSpan ProfilesFor = TimeSpan.FromHours(6);
 
     /// <summary>Profils de la bibliothèque et, calculés à la première demande, les morceaux de chaque station.</summary>
-    private sealed class Snapshot(IReadOnlyList<TrackProfile> profiles)
+    private sealed class Snapshot(IReadOnlyList<TrackProfile> profiles, SoundSpace sounds)
     {
         public IReadOnlyList<TrackProfile> Profiles { get; } = profiles;
+        /// <summary>Empreintes sonores : la station enchaîne des morceaux qui se ressemblent.</summary>
+        public SoundSpace Sounds { get; } = sounds;
         public System.Collections.Concurrent.ConcurrentDictionary<string, List<Candidate>> Pools { get; } = new();
     }
 
@@ -81,12 +84,17 @@ public sealed class RadioStations(IMemoryCache cache, IWeatherSource weather, Ti
             : null;
         var station = ambiance is not null ? AmbianceStation(ambiance) : (await TodayAsync(ct)).FirstOrDefault(s => s.Id == stationId);
         if (station is null) return null;
-        var candidates = StationCandidates(await SnapshotAsync(db, ct), station, await PersonalAsync(db, userId, ct));
+        var snapshot = await SnapshotAsync(db, ct);
+        var candidates = StationCandidates(snapshot, station, await PersonalAsync(db, userId, ct));
         // Une ambiance demandée joue même avec peu de morceaux : la radio recommence quand tout est passé.
         if (ambiance is null && candidates.Count < MinTracks) return null;
         if (candidates.Count == 0) return [];
-        var exclude = (req.ExcludeTrackIds ?? []).Take(MaxExclude).ToHashSet();
-        return Pick(candidates, exclude, Math.Clamp(req.Count, 1, MaxCount), Random.Shared);
+        var played = req.ExcludeTrackIds ?? [];
+        var exclude = played.Take(MaxExclude).ToHashSet();
+        // La file envoie ses morceaux dans l'ordre : la suite part du son du dernier.
+        var after = played.LastOrDefault(snapshot.Sounds.Knows);
+        return Pick(candidates, exclude, Math.Clamp(req.Count, 1, MaxCount), Random.Shared, snapshot.Sounds,
+            after == Guid.Empty ? null : after);
     }
 
     /// <summary>Lit une demande d'ambiance avec les genres de la bibliothèque ; null si ce n'en est pas une.</summary>
@@ -195,40 +203,92 @@ public sealed class RadioStations(IMemoryCache cache, IWeatherSource weather, Ti
     }
 
     /// <summary>
-    /// Tirage pondéré (les mieux notés sortent plus souvent), sans morceau exclu, au plus deux titres d'un même
-    /// artiste et jamais deux de suite tant que c'est possible.
+    /// Plus elle est grande, plus la radio colle au son du morceau précédent : le poids d'un candidat est multiplié par
+    /// ((1 + ressemblance) / 2) à cette puissance.
     /// </summary>
-    internal static List<Guid> Pick(IReadOnlyList<Candidate> candidates, IReadOnlySet<Guid> exclude, int count, Random rng)
+    public const double SoundSharpness = 8;
+
+    /// <summary>
+    /// Tirage pondéré, morceau après morceau : les mieux notés par la station sortent plus souvent, et surtout ceux qui
+    /// sonnent comme le morceau qui précède (<paramref name="sounds"/>, en partant de <paramref name="after"/>). La radio
+    /// glisse ainsi d'un titre à un voisin au lieu de sauter d'un style à l'autre. Sans morceau exclu, au plus deux titres
+    /// d'un même artiste et jamais deux de suite tant que c'est possible.
+    /// </summary>
+    internal static List<Guid> Pick(IReadOnlyList<Candidate> candidates, IReadOnlySet<Guid> exclude, int count, Random rng,
+        SoundSpace? sounds = null, Guid? after = null)
     {
         var pool = candidates.Where(c => !exclude.Contains(c.Profile.Id)).ToList();
         // Tout a déjà été joué : on recommence plutôt que de s'arrêter.
         if (pool.Count == 0) pool = candidates.ToList();
-        var order = pool.Select(c => (c, Key: Math.Pow(rng.NextDouble(), 1 / Math.Max(1e-6, c.Score * c.Score * c.Score))))
-            .OrderByDescending(x => x.Key).Select(x => x.c).ToList();
+        sounds ??= SoundSpace.Empty;
+        // Un tirage par candidat, gardé d'un pas à l'autre : seule la ressemblance au précédent change.
+        var draws = new Dictionary<Guid, double>();
+        foreach (var c in pool) draws[c.Profile.Id] = Math.Max(1e-12, rng.NextDouble());
 
         var picked = new List<TrackProfile>();
         var perArtist = new Dictionary<Guid, int>();
-        foreach (var pass in new[] { 2, int.MaxValue })
+        var previous = after;
+        while (picked.Count < count)
         {
-            foreach (var c in order)
-            {
-                if (picked.Count >= count) break;
-                if (picked.Contains(c.Profile)) continue;
-                if (perArtist.GetValueOrDefault(c.Profile.ArtistId) >= pass) continue;
-                if (pass == 2 && picked.Count > 0 && picked[^1].ArtistId == c.Profile.ArtistId) continue;
-                picked.Add(c.Profile);
-                perArtist[c.Profile.ArtistId] = perArtist.GetValueOrDefault(c.Profile.ArtistId) + 1;
-            }
+            var next = Next(pool, picked, perArtist, strict: true, previous, sounds, draws)
+                       ?? Next(pool, picked, perArtist, strict: false, previous, sounds, draws);
+            if (next is null) break;
+            picked.Add(next);
+            perArtist[next.ArtistId] = perArtist.GetValueOrDefault(next.ArtistId) + 1;
+            previous = next.Id;
         }
         return picked.Select(p => p.Id).ToList();
+    }
+
+    /// <summary>Le candidat de plus forte clé (tirage pondéré d'Efraimidis et Spirakis) que les règles d'artiste laissent passer.</summary>
+    private static TrackProfile? Next(List<Candidate> pool, List<TrackProfile> picked, Dictionary<Guid, int> perArtist, bool strict,
+        Guid? previous, SoundSpace sounds, Dictionary<Guid, double> draws)
+    {
+        TrackProfile? best = null;
+        var bestKey = double.NegativeInfinity;
+        var lastArtist = picked.Count > 0 ? picked[^1].ArtistId : (Guid?)null;
+        foreach (var c in pool)
+        {
+            var p = c.Profile;
+            if (picked.Contains(p)) continue;
+            if (strict && (perArtist.GetValueOrDefault(p.ArtistId) >= 2 || p.ArtistId == lastArtist)) continue;
+            var weight = Math.Max(1e-9, c.Score * c.Score * c.Score) * Affinity(previous, p.Id, sounds);
+            var key = Math.Log(draws[p.Id]) / weight;
+            if (key > bestKey)
+            {
+                bestKey = key;
+                best = p;
+            }
+        }
+        return best;
+    }
+
+    /// <summary>Poids sonore d'un candidat après <paramref name="previous"/> ; 1 si l'on ne sait pas les comparer.</summary>
+    private static double Affinity(Guid? previous, Guid candidate, SoundSpace sounds)
+    {
+        if (previous is not { } before || !sounds.Knows(before)) return 1;
+        // Candidat pas encore analysé : traité comme un morceau sans rapport.
+        var similarity = sounds.Similarity(before, candidate) ?? 0;
+        return Math.Max(1e-6, Math.Pow((1 + similarity) / 2, SoundSharpness));
     }
 
     private async Task<Snapshot> SnapshotAsync(SonNuageDbContext db, CancellationToken ct)
     {
         if (cache.TryGetValue(ProfilesKey, out Snapshot? known) && known is not null) return known;
-        var snapshot = new Snapshot(await LoadProfilesAsync(db, ct));
+        var snapshot = new Snapshot(await LoadProfilesAsync(db, ct), await LoadSoundsAsync(db, ct));
         cache.Set(ProfilesKey, snapshot, ProfilesFor);
         return snapshot;
+    }
+
+    /// <summary>Empreintes sonores des morceaux analysés, lues en base (sans cache).</summary>
+    public static async Task<SoundSpace> LoadSoundsAsync(SonNuageDbContext db, CancellationToken ct)
+    {
+        var rows = await db.AudioFeatures.AsNoTracking().Where(f => f.Error == null && f.Sound != null)
+            .Select(f => new { f.TrackId, f.Sound }).ToListAsync(ct);
+        var prints = new Dictionary<Guid, SoundPrint>(rows.Count);
+        foreach (var row in rows)
+            if (SoundPrint.FromBytes(row.Sound) is { } print) prints[row.TrackId] = print;
+        return SoundSpace.Create(prints);
     }
 
     /// <summary>Profils de tous les morceaux, lus en base (sans cache).</summary>

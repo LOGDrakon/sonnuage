@@ -16,6 +16,7 @@ public interface IAudioAnalyzer
 /// <summary>
 /// Caractéristiques d'un morceau : tempo en BPM, le reste de 0 à 1 (null quand le modèle n'a rien donné).
 /// <paramref name="Styles"/> : styles Discogs les plus probables, au format de <see cref="DiscogsStyles"/>.
+/// <paramref name="Sound"/> : empreinte sonore (<see cref="SoundPrint.ToBytes"/>), pour les radios.
 /// </summary>
 public sealed record AudioFeatureValues(
     double? Bpm,
@@ -30,7 +31,8 @@ public sealed record AudioFeatureValues(
     double? Acoustic,
     double? Electronic,
     double? Instrumental,
-    string? Styles = null);
+    string? Styles = null,
+    byte[]? Sound = null);
 
 /// <summary>Résultat de l'analyse d'un fichier : ses caractéristiques, ou la raison de l'échec.</summary>
 public abstract record AudioAnalysisOutcome
