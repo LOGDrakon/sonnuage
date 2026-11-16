@@ -31,3 +31,4 @@ packages/
 
 # Version écrite au déploiement depuis les sources (voir Dockerfile)
 /VERSION
+__pycache__/
