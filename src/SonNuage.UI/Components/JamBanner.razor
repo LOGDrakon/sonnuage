@@ -23,6 +23,7 @@
     {
         Jam.StateChanged += OnChanged;
         Jam.Ended += OnEnded;
+        Jam.Failed += OnFailed;
         Auth.Changed += OnAuthChanged;
         // Un Jam déjà suivi côté serveur (appli relancée) reprend tout seul.
         await Jam.ResumeAsync();
@@ -65,10 +66,13 @@
 
     private void OnEnded() => InvokeAsync(() => Ui.Notify(L["jam.ended"]));
 
+    private void OnFailed(string message) => InvokeAsync(() => Ui.Notify(L.Server(message), true));
+
     public void Dispose()
     {
         Jam.StateChanged -= OnChanged;
         Jam.Ended -= OnEnded;
+        Jam.Failed -= OnFailed;
         Auth.Changed -= OnAuthChanged;
     }
 }

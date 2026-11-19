@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
 using SonNuage.Contracts;
 
@@ -261,37 +262,117 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
     }
 
     /// <summary>
-    /// Cherche des titres sur Spotify : l'API Web d'abord (avec ISRC), sinon la recherche de l'appli (searchview).
-    /// Les résultats sont bruts : c'est <see cref="JamMatch"/> qui décide lequel est le bon.
+    /// Cherche des titres sur Spotify : d'abord la recherche du lecteur web (GraphQL « pathfinder », opération
+    /// searchTracks), sinon l'API Web (souvent limitée en débit pour ce client id). Les résultats sont bruts : c'est
+    /// <see cref="JamMatch"/> qui décide lequel est le bon.
     /// </summary>
-    public async Task<IReadOnlyList<SpotifySearchHit>> SearchAsync(SpotifyHosts? hosts, string accessToken, string query, CancellationToken ct)
+    public async Task<IReadOnlyList<SpotifySearchHit>> SearchAsync(string accessToken, string query, CancellationToken ct)
     {
-        var urls = new List<string> { $"https://api.spotify.com/v1/search?type=track&limit=10&q={Uri.EscapeDataString(query)}" };
-        if (hosts is not null)
-            urls.Add($"{hosts.SpClient}/searchview/km/v4/search/{Uri.EscapeDataString(query)}?entityVersion=2&limit=10&catalogue=&country=from_token&locale=fr");
-        foreach (var url in urls)
+        var hash = await SearchTracksHashAsync(ct);
+        var pathfinder = new HttpRequestMessage(HttpMethod.Post, "https://api-partner.spotify.com/pathfinder/v2/query")
         {
+            Content = new StringContent(new JsonObject
+            {
+                ["variables"] = new JsonObject
+                {
+                    ["searchTerm"] = query, ["offset"] = 0, ["limit"] = 10, ["numberOfTopResults"] = 5,
+                    ["includeAudiobooks"] = false, ["includePreReleases"] = false,
+                },
+                ["operationName"] = "searchTracks",
+                ["extensions"] = new JsonObject { ["persistedQuery"] = new JsonObject { ["version"] = 1, ["sha256Hash"] = hash } },
+            }.ToJsonString(), System.Text.Encoding.UTF8, "application/json"),
+        };
+        pathfinder.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        pathfinder.Headers.TryAddWithoutValidation("App-Platform", "WebPlayer");
+        foreach (var req in new[] { pathfinder, Get($"https://api.spotify.com/v1/search?type=track&limit=10&q={Uri.EscapeDataString(query)}", accessToken) })
+        {
+            var source = req.RequestUri!.Host;
             try
             {
-                using var req = Get(url, accessToken);
+                using var _ = req;
                 using var res = await http.SendAsync(req, ct);
                 if (res.IsSuccessStatusCode)
                 {
                     var hits = ParseSearch(await res.Content.ReadAsByteArrayAsync(ct));
-                    log.LogInformation("Jam : recherche Spotify ({Source}) « {Query} » : {Count} titre(s)", new Uri(url).Host, query, hits.Count);
+                    log.LogInformation("Jam : recherche Spotify ({Source}) « {Query} » : {Count} titre(s)", source, query, hits.Count);
                     return hits;
                 }
-                log.LogInformation("Jam : recherche Spotify ({Source}) : {Status}", new Uri(url).Host, (int)res.StatusCode);
+                log.LogInformation("Jam : recherche Spotify ({Source}) : {Status}", source, (int)res.StatusCode);
             }
             catch (HttpRequestException ex)
             {
-                log.LogInformation("Jam : recherche Spotify ({Source}) impossible : {Error}", new Uri(url).Host, ex.Message);
+                log.LogInformation("Jam : recherche Spotify ({Source}) impossible : {Error}", source, ex.Message);
             }
         }
         return [];
     }
 
-    /// <summary>Résultats de l'API Web (<c>tracks.items</c>) ou de searchview (<c>results.tracks.hits</c>) ; titres seulement.</summary>
+    /// <summary>Hash connu de la requête searchTracks (lecteur web de novembre 2026), si la découverte échoue.</summary>
+    private const string KnownSearchTracksHash = "b02683192a98dde7966b5e6655a79eeb62713eab703eda9902c932818dd52751";
+    private static readonly TimeSpan SearchHashLifetime = TimeSpan.FromHours(12);
+    private static (string Hash, DateTimeOffset At)? _searchHash;
+
+    /// <summary>
+    /// Le hash de la requête searchTracks change à chaque déploiement du lecteur web : on le relit dans son code public
+    /// (page d'accueil → script principal → morceau « xpui-routes-search »), gardé 12 h. En échec, le hash connu.
+    /// </summary>
+    private async Task<string> SearchTracksHashAsync(CancellationToken ct)
+    {
+        if (_searchHash is { } cached && DateTimeOffset.UtcNow - cached.At < SearchHashLifetime) return cached.Hash;
+        string? found = null;
+        var trail = "accueil";
+        try
+        {
+            const string cdn = "https://open.spotifycdn.com/cdn/build/web-player/";
+            var home = await PageAsync("https://open.spotify.com/", ct);
+            var main = Regex.Match(home, @"https://open\.spotifycdn\.com/cdn/build/web-player/web-player\.[0-9a-f]+\.js");
+            trail = main.Success ? "script principal" : $"accueil sans script principal ({home.Length} car.)";
+            if (main.Success)
+            {
+                var code = await PageAsync(main.Value, ct);
+                trail = $"script principal ({code.Length} car.), morceaux {string.Join("/", FindChunkHashes(code, "xpui-routes-search"))}";
+                found = FindQueryHash(code, "searchTracks");
+                foreach (var chunk in found is null ? FindChunkHashes(code, "xpui-routes-search") : [])
+                {
+                    if (FindQueryHash(await PageAsync($"{cdn}xpui-routes-search.{chunk}.js", ct), "searchTracks") is { } h) { found = h; break; }
+                }
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            log.LogInformation("Jam : hash de recherche Spotify introuvable ({Error}), hash connu utilisé", ex.Message);
+        }
+        if (found is null) log.LogInformation("Jam : hash de recherche Spotify non trouvé dans le lecteur web ({Trail}), hash connu utilisé", trail);
+        var hash = found ?? KnownSearchTracksHash;
+        _searchHash = (hash, DateTimeOffset.UtcNow);
+        return hash;
+    }
+
+    /// <summary>Page ou script du lecteur web, demandé comme un navigateur (sans user agent, la page d'accueil diffère) ; vide en échec.</summary>
+    private async Task<string> PageAsync(string url, CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36");
+        using var res = await http.SendAsync(req, ct);
+        return res.IsSuccessStatusCode ? await res.Content.ReadAsStringAsync(ct) : "";
+    }
+
+    /// <summary>Hash d'une requête GraphQL persistée dans le code du lecteur web (<c>("searchTracks","query","…")</c>).</summary>
+    public static string? FindQueryHash(string code, string operation)
+    {
+        var m = Regex.Match(code, $@"""{Regex.Escape(operation)}"",""query"",""([0-9a-f]{{64}})""");
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>Hashes possibles du fichier d'un morceau de code nommé (numéro → nom, puis numéro → hash, JS et CSS).</summary>
+    public static IReadOnlyList<string> FindChunkHashes(string code, string chunkName)
+    {
+        var id = Regex.Match(code, $@"(\d+):""{Regex.Escape(chunkName)}""");
+        if (!id.Success) return [];
+        return Regex.Matches(code, $@"[{{,]{id.Groups[1].Value}:""([0-9a-f]{{8}})""").Select(m => m.Groups[1].Value).Distinct().ToList();
+    }
+
+    /// <summary>Résultats de pathfinder (<c>data.searchV2.tracksV2.items</c>) ou de l'API Web (<c>tracks.items</c>) ; titres seulement.</summary>
     public static IReadOnlyList<SpotifySearchHit> ParseSearch(byte[] json)
     {
         try
@@ -300,9 +381,12 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return [];
             JsonElement list = default;
-            var found = root.TryGetProperty("tracks", out var tr) && tr.ValueKind == JsonValueKind.Object && tr.TryGetProperty("items", out list)
-                || root.TryGetProperty("results", out var rs) && rs.ValueKind == JsonValueKind.Object
-                   && rs.TryGetProperty("tracks", out var rt) && rt.ValueKind == JsonValueKind.Object && rt.TryGetProperty("hits", out list);
+            var found = root.TryGetProperty("tracks", out var tr) && tr.ValueKind == JsonValueKind.Object && tr.TryGetProperty("items", out list);
+            if (!found && root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object
+                && data.TryGetProperty("searchV2", out var sv) && sv.ValueKind == JsonValueKind.Object
+                && sv.TryGetProperty("tracksV2", out var tv) && tv.ValueKind == JsonValueKind.Object && tv.TryGetProperty("items", out var pitems)
+                && pitems.ValueKind == JsonValueKind.Array)
+                return pitems.EnumerateArray().Select(PathfinderHit).OfType<SpotifySearchHit>().ToList();
             if (!found || list.ValueKind != JsonValueKind.Array) return [];
             var hits = new List<SpotifySearchHit>();
             foreach (var item in list.EnumerateArray())
@@ -323,6 +407,22 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
         {
             return [];
         }
+    }
+
+    /// <summary>Un résultat pathfinder : <c>{"item":{"data":{"uri","name","duration":{"totalMilliseconds"},"artists":{"items":[{"profile":{"name"}}]}}}}</c>.</summary>
+    private static SpotifySearchHit? PathfinderHit(JsonElement entry)
+    {
+        if (entry.ValueKind != JsonValueKind.Object || !entry.TryGetProperty("item", out var item) || item.ValueKind != JsonValueKind.Object
+            || !item.TryGetProperty("data", out var d) || d.ValueKind != JsonValueKind.Object) return null;
+        if (Text(d, "uri") is not { } uri || !uri.StartsWith("spotify:track:", StringComparison.Ordinal) || Text(d, "name") is not { Length: > 0 } name) return null;
+        var ms = d.TryGetProperty("duration", out var du) && du.ValueKind == JsonValueKind.Object
+            && du.TryGetProperty("totalMilliseconds", out var tm) && tm.ValueKind == JsonValueKind.Number ? tm.GetDouble() : 0;
+        var artists = d.TryGetProperty("artists", out var ar) && ar.ValueKind == JsonValueKind.Object
+            && ar.TryGetProperty("items", out var ai) && ai.ValueKind == JsonValueKind.Array
+            ? ai.EnumerateArray().Where(a => a.ValueKind == JsonValueKind.Object && a.TryGetProperty("profile", out var p) && p.ValueKind == JsonValueKind.Object)
+                .Select(a => Text(a.GetProperty("profile"), "name")).Where(n => !string.IsNullOrEmpty(n))
+            : [];
+        return new SpotifySearchHit(uri, new JamTrackDto(name, string.Join(", ", artists), null, ms / 1000.0, null));
     }
 
     /// <summary>
@@ -358,6 +458,17 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
             ["metadata"] = new JsonObject { ["is_queued"] = "true" },
             ["provider"] = "queue",
         },
+    });
+
+    /// <summary>
+    /// Lance un titre tout de suite chez l'hôte (contexte = ce titre) ; sa file est conservée. Préféré à « ajouter puis
+    /// suivant », qui jouerait le plus ancien titre en file.
+    /// </summary>
+    public static JsonObject PlayCommand(string trackUri) => Logged(new JsonObject
+    {
+        ["endpoint"] = "play",
+        ["context"] = new JsonObject { ["uri"] = trackUri, ["url"] = $"context://{trackUri}", ["metadata"] = new JsonObject() },
+        ["options"] = new JsonObject { ["skip_to"] = new JsonObject { ["track_uri"] = trackUri } },
     });
 
     private static JsonObject Logged(JsonObject command)

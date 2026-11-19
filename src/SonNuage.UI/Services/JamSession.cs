@@ -9,7 +9,7 @@ namespace SonNuage.UI.Services;
 /// — même titre (bibliothèque ou import YouTube), même position, mêmes pauses. En mode « hôte seulement », l'état est
 /// seulement affiché. Le serveur fait le gros du travail (voir <c>JamHub</c>) ; ici on écoute et on recale.
 /// </summary>
-public sealed class JamSession : IDisposable
+public sealed class JamSession : IDisposable, IPlayerRoute
 {
     /// <summary>
     /// Écart toléré avant de recaler le lecteur sur l'hôte. Large exprès : chacun écoute de son côté, une seconde ou
@@ -74,6 +74,8 @@ public sealed class JamSession : IDisposable
         _player = player;
         _auth = auth;
         _player.StateChanged += OnPlayerState;
+        // Dans un Jam, ce que l'utilisateur fait au lecteur va à l'hôte (voir la section « Piloter l'hôte »).
+        if (_player is IRoutablePlayer routable) routable.Route = this;
     }
 
     private static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -103,6 +105,9 @@ public sealed class JamSession : IDisposable
 
     /// <summary>Le Jam s'est arrêté sans qu'on le quitte (fini par l'hôte, exclu, connexion perdue pour de bon).</summary>
     public event Action? Ended;
+
+    /// <summary>Une commande envoyée à l'hôte a échoué (titre absent de Spotify, commande refusée…) : message du serveur.</summary>
+    public event Action<string>? Failed;
 
     public Task<MusicServiceAccountDto?> SpotifyAccountAsync() => _api.SpotifyAccountAsync();
 
@@ -244,6 +249,8 @@ public sealed class JamSession : IDisposable
     /// </summary>
     private async Task SyncLoopAsync(CancellationToken ct)
     {
+        // Les commandes de la synchro vont au lecteur local ; seules celles de l'utilisateur vont à l'hôte.
+        PlayerRouting.Bypass();
         while (!ct.IsCancellationRequested)
         {
             try
@@ -458,5 +465,57 @@ public sealed class JamSession : IDisposable
     {
         _player.StateChanged -= OnPlayerState;
         StopFollow();
+    }
+
+    // ---- Piloter l'hôte : les commandes de l'utilisateur au lecteur vont au Jam (IPlayerRoute) ----
+
+    /// <summary>En mode invité : sur le lecteur local, la synchro annulerait aussitôt une pause ou un saut.</summary>
+    public bool Routes => State is { Active: true, Audio: JamAudio.Guest };
+
+    Task IPlayerRoute.TogglePlayAsync() => ControlAsync(new JamControlRequest(State.IsPlaying ? JamControl.Pause : JamControl.Resume));
+
+    Task IPlayerRoute.SeekAsync(double seconds) => ControlAsync(new JamControlRequest(JamControl.Seek, seconds));
+
+    Task IPlayerRoute.NextAsync() => ControlAsync(new JamControlRequest(JamControl.Next));
+
+    Task IPlayerRoute.PreviousAsync() => ControlAsync(new JamControlRequest(JamControl.Previous));
+
+    Task IPlayerRoute.PlayAsync(TrackDto track) => QueueAsync([track], playNow: true);
+
+    Task IPlayerRoute.EnqueueAsync(IReadOnlyList<TrackDto> tracks) => QueueAsync(tracks, playNow: false);
+
+    /// <summary>Au plus autant de titres envoyés d'un coup dans la file de l'hôte (chacun est cherché sur Spotify).</summary>
+    private const int MaxQueued = 20;
+
+    private async Task ControlAsync(JamControlRequest request)
+    {
+        try
+        {
+            await _api.JamControlAsync(request);
+        }
+        catch (ApiException ex)
+        {
+            Failed?.Invoke(ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Titres de la bibliothèque seulement : un flux YouTube direct n'existe pas côté serveur. On s'arrête au premier
+    /// refus pour ne pas répéter le même message.
+    /// </summary>
+    private async Task QueueAsync(IReadOnlyList<TrackDto> tracks, bool playNow)
+    {
+        foreach (var track in tracks.Where(t => !YoutubeTracks.IsYoutube(t)).Take(playNow ? 1 : MaxQueued))
+        {
+            try
+            {
+                await _api.JamQueueAsync(new JamQueueRequest(track.Id, playNow));
+            }
+            catch (ApiException ex)
+            {
+                Failed?.Invoke(ex.Message);
+                return;
+            }
+        }
     }
 }

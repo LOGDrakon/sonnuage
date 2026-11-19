@@ -7,8 +7,11 @@ namespace SonNuage.UI.Services;
 /// le signale (claim) et les autres se taisent, puis affichent son état et lui transmettent leurs commandes,
 /// comme une télécommande. Quand il disparaît, chacun reprend sa file, en pause. « Lire ici » ramène la lecture.
 /// </summary>
-public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer
+public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer, IRoutablePlayer
 {
+    /// <summary>Dans un Jam, les commandes de l'utilisateur vont à l'hôte (voir <see cref="IPlayerRoute"/>).</summary>
+    public IPlayerRoute? Route { get; set; }
+
     /// <summary>Le temps pour un lecteur actif de répondre à un nouvel arrivant.</summary>
     private static readonly TimeSpan HelloWait = TimeSpan.FromMilliseconds(300);
 
@@ -110,20 +113,23 @@ public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer
     // ---- IPlayer : ici, ou transmis au lecteur actif ----
 
     public Task PlayAsync(IReadOnlyList<TrackDto> tracks, int startIndex = 0, bool? shuffle = null) =>
+        PlayerRouting.For(Route) is { } route ? (startIndex >= 0 && startIndex < tracks.Count ? route.PlayAsync(tracks[startIndex]) : Task.CompletedTask) :
         IsRemote ? SendAsync(new PlayerCommand("play", Tracks: tracks, Index: startIndex, Shuffle: shuffle)) : _local.PlayAsync(tracks, startIndex, shuffle);
 
     /// <summary>Sur un autre appareil, la radio part comme une simple liste : seul ce lecteur-ci sait demander la suite.</summary>
     public Task PlayStationAsync(string stationId, IReadOnlyList<TrackDto> tracks) =>
+        PlayerRouting.For(Route) is not null ? PlayAsync(tracks, 0) :
         IsRemote ? PlayAsync(tracks, 0, shuffle: false) : _local.PlayStationAsync(stationId, tracks);
 
-    public Task TogglePlayAsync() => IsRemote ? SendAsync(new PlayerCommand("toggle")) : _local.TogglePlayAsync();
+    public Task TogglePlayAsync() => PlayerRouting.For(Route) is { } route ? route.TogglePlayAsync() : IsRemote ? SendAsync(new PlayerCommand("toggle")) : _local.TogglePlayAsync();
 
-    public Task NextAsync() => IsRemote ? SendAsync(new PlayerCommand("next")) : _local.NextAsync();
+    public Task NextAsync() => PlayerRouting.For(Route) is { } route ? route.NextAsync() : IsRemote ? SendAsync(new PlayerCommand("next")) : _local.NextAsync();
 
-    public Task PreviousAsync() => IsRemote ? SendAsync(new PlayerCommand("previous")) : _local.PreviousAsync();
+    public Task PreviousAsync() => PlayerRouting.For(Route) is { } route ? route.PreviousAsync() : IsRemote ? SendAsync(new PlayerCommand("previous")) : _local.PreviousAsync();
 
     public Task SeekAsync(double seconds)
     {
+        if (PlayerRouting.For(Route) is { } route) return route.SeekAsync(seconds);
         if (!IsRemote) return _local.SeekAsync(seconds);
         _remote = _remote with { PositionSeconds = seconds };
         StateChanged?.Invoke();
@@ -158,6 +164,7 @@ public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer
     }
 
     public Task EnqueueAsync(IReadOnlyList<TrackDto> tracks, bool playNext) =>
+        PlayerRouting.For(Route) is { } route ? route.EnqueueAsync(tracks) :
         IsRemote ? SendAsync(new PlayerCommand("enqueue", Tracks: tracks, Flag: playNext)) : _local.EnqueueAsync(tracks, playNext);
 
     public Task RemoveAtAsync(int queueIndex) => IsRemote ? SendAsync(new PlayerCommand("remove", Index: queueIndex)) : _local.RemoveAtAsync(queueIndex);

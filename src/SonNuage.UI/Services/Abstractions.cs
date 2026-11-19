@@ -114,3 +114,39 @@ public interface IRestorablePlayer
     /// <summary>Avant un rechargement de la page : file et position enregistrées, lecture reprise après.</summary>
     Task PrepareReloadAsync() => Task.CompletedTask;
 }
+
+/// <summary>
+/// Où vont les commandes de l'utilisateur quand le lecteur local n'a pas la main : dans un Jam, au lecteur de l'hôte
+/// (sinon la synchro les annulerait aussitôt). <see cref="Routes"/> faux : rien n'est détourné.
+/// </summary>
+public interface IPlayerRoute
+{
+    bool Routes { get; }
+    Task TogglePlayAsync();
+    Task SeekAsync(double seconds);
+    Task NextAsync();
+    Task PreviousAsync();
+    /// <summary>Lancer ce titre tout de suite.</summary>
+    Task PlayAsync(TrackDto track);
+    Task EnqueueAsync(IReadOnlyList<TrackDto> tracks);
+}
+
+/// <summary>Un lecteur dont les commandes peuvent être détournées (voir <see cref="IPlayerRoute"/>).</summary>
+public interface IRoutablePlayer
+{
+    IPlayerRoute? Route { get; set; }
+}
+
+/// <summary>
+/// Les commandes de la synchro du Jam ne doivent pas être détournées vers l'hôte : elle appelle <see cref="Bypass"/>
+/// au début de sa boucle, et ce marqueur ne vaut que pour son propre flux asynchrone.
+/// </summary>
+public static class PlayerRouting
+{
+    private static readonly AsyncLocal<bool> Bypassed = new();
+
+    public static void Bypass() => Bypassed.Value = true;
+
+    /// <summary>La route à suivre pour une commande de l'utilisateur, ou null pour le lecteur local.</summary>
+    public static IPlayerRoute? For(IPlayerRoute? route) => route is { Routes: true } && !Bypassed.Value ? route : null;
+}

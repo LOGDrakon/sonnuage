@@ -167,6 +167,79 @@ public class LinkedPlayerTests
         Assert.Equal(supported, new LinkedPlayer(local, local, new Bus().Join("tab")).SupportsCrossfade);
     }
 
+    private sealed class RecordingRoute : IPlayerRoute
+    {
+        public bool Routes { get; set; } = true;
+        public List<string> Calls { get; } = [];
+        public Task TogglePlayAsync() { Calls.Add("toggle"); return Task.CompletedTask; }
+        public Task SeekAsync(double seconds) { Calls.Add($"seek {seconds}"); return Task.CompletedTask; }
+        public Task NextAsync() { Calls.Add("next"); return Task.CompletedTask; }
+        public Task PreviousAsync() { Calls.Add("previous"); return Task.CompletedTask; }
+        public Task PlayAsync(TrackDto track) { Calls.Add($"play {track.Title}"); return Task.CompletedTask; }
+        public Task EnqueueAsync(IReadOnlyList<TrackDto> tracks) { Calls.Add($"enqueue {string.Join(",", tracks.Select(t => t.Title))}"); return Task.CompletedTask; }
+    }
+
+    [Fact]
+    public async Task During_a_jam_the_users_commands_go_to_the_host()
+    {
+        // Dans un Jam, pause, saut, suivant ou « lire » doivent agir chez l'hôte : sur le lecteur local, la synchro les
+        // annulerait aussitôt.
+        var local = new FakePlayer();
+        var player = new LinkedPlayer(local, local, new Bus().Join("tab"));
+        await player.RestoreAsync();
+        await player.PlayAsync(Tracks, 0);
+        var route = new RecordingRoute();
+        player.Route = route;
+        var before = local.State;
+
+        await player.TogglePlayAsync();
+        await player.SeekAsync(42);
+        await player.NextAsync();
+        await player.PreviousAsync();
+        await player.PlayAsync(Tracks, 1);
+        await player.EnqueueAsync([Tracks[2]], playNext: false);
+
+        Assert.Equal(["toggle", "seek 42", "next", "previous", "play B", "enqueue C"], route.Calls);
+        Assert.Equal(before, local.State);
+    }
+
+    [Fact]
+    public async Task The_jam_sync_itself_drives_the_local_player()
+    {
+        var local = new FakePlayer();
+        var player = new LinkedPlayer(local, local, new Bus().Join("tab"));
+        await player.RestoreAsync();
+        var route = new RecordingRoute();
+        player.Route = route;
+
+        await SyncAsync(player);
+
+        Assert.Empty(route.Calls);
+        Assert.Equal("A", local.State.Current?.Title);
+        // Le contournement reste propre à la synchro : une commande de l'utilisateur ensuite va toujours à l'hôte.
+        await player.NextAsync();
+        Assert.Equal(["next"], route.Calls);
+
+        static async Task SyncAsync(LinkedPlayer p)
+        {
+            PlayerRouting.Bypass();
+            await p.PlayAsync(Tracks, 0);
+        }
+    }
+
+    [Fact]
+    public async Task Without_an_active_jam_commands_stay_local()
+    {
+        var local = new FakePlayer();
+        var player = new LinkedPlayer(local, local, new Bus().Join("tab"));
+        await player.RestoreAsync();
+        player.Route = new RecordingRoute { Routes = false };
+
+        await player.PlayAsync(Tracks, 1);
+
+        Assert.Equal("B", local.State.Current?.Title);
+    }
+
     private static async Task<(LinkedPlayer A, FakePlayer LocalA, LinkedPlayer B, FakePlayer LocalB, Bus Bus)> TwoTabsAsync()
     {
         var bus = new Bus();

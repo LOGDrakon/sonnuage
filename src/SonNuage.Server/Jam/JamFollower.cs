@@ -537,8 +537,8 @@ public sealed class JamFollower : IAsyncDisposable
     }
 
     /// <summary>
-    /// Trouve un titre de SonNuage sur Spotify et l'ajoute à la file de l'hôte (puis passe dessus si
-    /// <paramref name="playNow"/>). NotOnSpotify si aucun résultat n'est sûr.
+    /// Trouve un titre de SonNuage sur Spotify et l'ajoute à la file de l'hôte, ou le lance aussitôt si
+    /// <paramref name="playNow"/>. NotOnSpotify si aucun résultat n'est sûr.
     /// </summary>
     public async Task<JamCommandResult> QueueAsync(JamTrackDto track, bool playNow, CancellationToken ct)
     {
@@ -548,15 +548,13 @@ public sealed class JamFollower : IAsyncDisposable
         IReadOnlyList<SpotifySearchHit> hits;
         using (var scope = _scopes.CreateScope())
             hits = await scope.ServiceProvider.GetRequiredService<SpotifyClient>()
-                .SearchAsync(session.Hosts, accessToken, $"{track.Title} {track.Artist}".Trim(), ct);
+                .SearchAsync(accessToken, $"{track.Title} {track.Artist}".Trim(), ct);
         // Le fichier de SonNuage peut venir d'un clip : tolérance de durée d'une vidéo.
         var best = JamMatch.Best(track, hits, h => new JamCandidate(h.Track.Title, h.Track.Artist, h.Track.DurationSeconds, h.Track.Isrc, JamSourceKind.Video));
         _log.LogInformation("Jam : « {Title} » — {Artist} vers Spotify : {Count} résultat(s) → {Chosen}",
             track.Title, track.Artist, hits.Count, best is { } b ? $"« {b.Item.Track.Title} » — {b.Item.Track.Artist} ({b.Verdict.Reason}, {b.Verdict.Score})" : "aucun sûr");
         if (best is not { } chosen) return JamCommandResult.NotOnSpotify;
-        var queued = await SendAsync(SpotifyClient.QueueCommand(chosen.Item.Uri), ct);
-        if (queued != JamCommandResult.Sent || !playNow) return queued;
-        return await SendAsync(SpotifyClient.ControlCommand(JamControl.Next, null)!, ct);
+        return await SendAsync(playNow ? SpotifyClient.PlayCommand(chosen.Item.Uri) : SpotifyClient.QueueCommand(chosen.Item.Uri), ct);
     }
 
     /// <summary>Quitte le Jam côté Spotify (au mieux, sans bloquer l'arrêt) : on cesse d'y apparaître comme membre.</summary>

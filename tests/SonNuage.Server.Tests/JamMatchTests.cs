@@ -92,6 +92,17 @@ public sealed class JamMatchTests
         Assert.True(JamMatch.Evaluate(host, Audio("Stereo Hearts", "Adam Levine", 211)).Accepted);
     }
 
+    [Theory]
+    [InlineData("ivycomb feat. YonKaGor", "ivycomb, YonKaGor")]
+    [InlineData("ivycomb & Stephanafro", "ivycomb")]
+    [InlineData("Black Gryph0n x Baasik", "Baasik")]
+    [InlineData("ivycomb", "ivycomb, YonKaGor")]
+    public void Featured_and_joined_artists_are_split(string host, string candidate)
+    {
+        // Cas réel : « Blue Bird » de la bibliothèque (« ivycomb feat. YonKaGor ») introuvable sur Spotify.
+        Assert.True(JamMatch.Evaluate(Host("Blue Bird", host, 243), Audio("Blue Bird", candidate, 243)).Accepted);
+    }
+
     [Fact]
     public void An_artist_name_with_a_comma_still_matches()
     {

@@ -309,11 +309,36 @@ public sealed class JamTests
     }
 
     [Fact]
-    public void Searchview_results_are_read()
+    public void Pathfinder_search_results_are_read()
     {
-        var json = """{"results":{"tracks":{"hits":[{"uri":"spotify:track:b","name":"Song","duration":200000,"artists":[{"name":"A"},{"name":"B"}]}]}}}""";
+        var json = """
+            {"data":{"searchV2":{"tracksV2":{"items":[
+              {"item":{"data":{"__typename":"Track","uri":"spotify:track:c","name":"Emperors","duration":{"totalMilliseconds":128000},
+                "artists":{"items":[{"profile":{"name":"nihmune"}}]}}}},
+              {"item":{"data":{"__typename":"RestrictedContent"}}}]}}}}
+            """;
         var hit = Assert.Single(SpotifyClient.ParseSearch(Encoding.UTF8.GetBytes(json)));
-        Assert.Equal(new JamTrackDto("Song", "A, B", null, 200, null), hit.Track);
-        Assert.Empty(SpotifyClient.ParseSearch(Encoding.UTF8.GetBytes("<html>")));
+        Assert.Equal("spotify:track:c", hit.Uri);
+        Assert.Equal(new JamTrackDto("Emperors", "nihmune", null, 128, null), hit.Track);
+    }
+
+    [Fact]
+    public void The_search_query_hash_is_found_in_the_web_player_code()
+    {
+        const string chunk = """let s0=[],s1=new _.l("searchTracks","query","b02683192a98dde7966b5e6655a79eeb62713eab703eda9902c932818dd52751",null);""";
+        Assert.Equal("b02683192a98dde7966b5e6655a79eeb62713eab703eda9902c932818dd52751", SpotifyClient.FindQueryHash(chunk, "searchTracks"));
+        Assert.Null(SpotifyClient.FindQueryHash("nothing", "searchTracks"));
+        // Le même numéro de morceau a un hash pour le JS et un pour le CSS : on les essaie tous.
+        const string main = """...4406:"xpui-routes-search",4563:"x"...{4406:"92c90ba3",4563:"aaaa1111"}...{4406:"a0a5ee13"}""";
+        Assert.Equal(["92c90ba3", "a0a5ee13"], SpotifyClient.FindChunkHashes(main, "xpui-routes-search"));
+    }
+
+    [Fact]
+    public void Playing_now_starts_that_track_instead_of_skipping_into_the_queue()
+    {
+        // « Ajouter puis suivant » jouerait le plus ancien titre de la file, pas celui demandé.
+        var command = SpotifyClient.PlayCommand("spotify:track:abc");
+        command.Remove("logging_params");
+        Assert.Equal("""{"endpoint":"play","context":{"uri":"spotify:track:abc","url":"context://spotify:track:abc","metadata":{}},"options":{"skip_to":{"track_uri":"spotify:track:abc"}}}""", command.ToJsonString());
     }
 }

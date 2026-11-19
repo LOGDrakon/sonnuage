@@ -87,6 +87,8 @@ public sealed class ApiClient(IHttpClientFactory httpFactory, IServerEndpoint en
     public Task<JamStateDto?> JamJoinAsync(JamJoinRequest req) => SendAsync<JamStateDto>(HttpMethod.Post, "api/me/jam/join", req);
     public Task JamLeaveAsync() => SendAsync(HttpMethod.Post, "api/me/jam/leave");
     public Task<JamStateDto?> JamStateAsync() => GetAsync<JamStateDto>("api/me/jam/state");
+    public Task JamControlAsync(JamControlRequest req) => SendAsync(HttpMethod.Post, Contracts.Jam.ControlRoute, req);
+    public Task JamQueueAsync(JamQueueRequest req) => SendAsync(HttpMethod.Post, Contracts.Jam.QueueRoute, req);
 
     /// <summary>Flux d'état du Jam suivi (Server-Sent Events). Se termine quand le flux se ferme ou reste muet.</summary>
     public async IAsyncEnumerable<ServerSentEvent> JamStreamAsync([EnumeratorCancellation] CancellationToken ct)

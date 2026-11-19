@@ -104,14 +104,20 @@ public static partial class JamMatch
         "the", "x", "vs", "full", "song", "track", "out", "now", "new",
     ];
 
-    /// <summary>« Tyler, The Creator » ou « Gym Class Heroes, Adam Levine » : chaque part, et le tout.</summary>
+    /// <summary>
+    /// Le nom entier et chacun des artistes réunis : « Gym Class Heroes, Adam Levine », « ivycomb feat. YonKaGor »,
+    /// « A &amp; B », « A x B »… Un seul suffit (« Tyler, The Creator » reste trouvé par son nom entier).
+    /// </summary>
     private static IEnumerable<string> ArtistNames(string artist)
     {
         if (string.IsNullOrWhiteSpace(artist)) yield break;
         yield return artist;
-        foreach (var part in artist.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
-            yield return part;
+        foreach (var part in ArtistSeparators().Split(artist))
+            if (part.Trim() is { Length: > 0 } name) yield return name;
     }
+
+    [GeneratedRegex(@"\s*(?:,|&|\+|/|\b(?:feat|ft)\.?|\bfeaturing\b|\bwith\b|\bx\b|\bvs\.?)\s*", RegexOptions.IgnoreCase)]
+    private static partial Regex ArtistSeparators();
 
     /// <summary>
     /// L'artiste est-il là : tous ses mots présents, ou son nom collé dans un nom de chaîne (« TheWeekndVEVO ») quand il
