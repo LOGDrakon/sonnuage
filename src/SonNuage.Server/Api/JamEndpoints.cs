@@ -70,6 +70,22 @@ public static class JamEndpoints
             return Results.NoContent();
         });
 
+        // Piloter le lecteur de l'hôte : pause, reprise, position, titre suivant ou précédent.
+        g.MapPost("/control", async (JamControlRequest req, HttpContext http, JamHub hub, CancellationToken ct) =>
+        {
+            if (SpotifyClient.ControlCommand(req.Action, req.PositionSeconds) is not { } command) return Results.BadRequest();
+            return Outcome(await hub.SendAsync(http.User.UserId(), command, ct));
+        });
+
+        // Faire jouer un titre de SonNuage dans le Jam (cherché sur Spotify, ajouté à la file de l'hôte).
+        g.MapPost("/queue", async (JamQueueRequest req, HttpContext http, JamHub hub, SonNuageDbContext db, CancellationToken ct) =>
+        {
+            var track = await db.Tracks.AsNoTracking().Where(t => t.Id == req.TrackId)
+                .Select(t => new JamTrackDto(t.Title, t.ArtistName, t.AlbumTitle, t.DurationSeconds, null)).FirstOrDefaultAsync(ct);
+            if (track is null) return Results.NotFound();
+            return Outcome(await hub.QueueAsync(http.User.UserId(), track, req.PlayNow, ct));
+        });
+
         g.MapGet("/state", (HttpContext http, JamHub hub) => Results.Text(JamHub.Serialize(hub.Current(http.User.UserId())), "application/json"));
 
         // Flux d'état du Jam (Server-Sent Events) : un « state » à l'abonnement, puis à chaque changement.
@@ -124,4 +140,14 @@ public static class JamEndpoints
             }
         }
     }
+
+    /// <summary>Issue d'une commande au lecteur de l'hôte, en réponse HTTP.</summary>
+    private static IResult Outcome(JamCommandResult result) => result switch
+    {
+        JamCommandResult.Sent => Results.NoContent(),
+        JamCommandResult.NotReady => Results.Problem(Tx.Key("errors.jam.notFollowing"), statusCode: 409),
+        JamCommandResult.NotOnSpotify => Results.Problem(Tx.Key("errors.jam.notOnSpotify"), statusCode: 404),
+        _ => Results.Problem(Tx.Key("errors.jam.controlRefused"), statusCode: 403),
+    };
+
 }

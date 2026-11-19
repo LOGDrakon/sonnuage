@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Net.WebSockets;
@@ -520,6 +521,44 @@ public sealed class JamFollower : IAsyncDisposable
         if (!_over) await LeaveSessionAsync();
     }
 
+    /// <summary>
+    /// Envoie une commande au lecteur de l'hôte. Pas encore rejoint ou pas d'appareil actif chez l'hôte : NotReady ;
+    /// refusée par Spotify (droits du Jam) : Refused.
+    /// </summary>
+    public async Task<JamCommandResult> SendAsync(JsonObject command, CancellationToken ct)
+    {
+        if (!_connected || _session is not { } session || _lastCluster?.ActiveDeviceId is not { Length: > 0 } host) return JamCommandResult.NotReady;
+        var accessToken = await FreshAccessTokenAsync(ct);
+        if (accessToken is null) return JamCommandResult.NotReady;
+        using var scope = _scopes.CreateScope();
+        var status = await scope.ServiceProvider.GetRequiredService<SpotifyClient>()
+            .CommandAsync(session.Hosts, accessToken, $"hobs_{_deviceId}", host, command, ct);
+        return status is >= 200 and < 300 ? JamCommandResult.Sent : JamCommandResult.Refused;
+    }
+
+    /// <summary>
+    /// Trouve un titre de SonNuage sur Spotify et l'ajoute à la file de l'hôte (puis passe dessus si
+    /// <paramref name="playNow"/>). NotOnSpotify si aucun résultat n'est sûr.
+    /// </summary>
+    public async Task<JamCommandResult> QueueAsync(JamTrackDto track, bool playNow, CancellationToken ct)
+    {
+        if (!_connected || _session is not { } session) return JamCommandResult.NotReady;
+        var accessToken = await FreshAccessTokenAsync(ct);
+        if (accessToken is null) return JamCommandResult.NotReady;
+        IReadOnlyList<SpotifySearchHit> hits;
+        using (var scope = _scopes.CreateScope())
+            hits = await scope.ServiceProvider.GetRequiredService<SpotifyClient>()
+                .SearchAsync(session.Hosts, accessToken, $"{track.Title} {track.Artist}".Trim(), ct);
+        // Le fichier de SonNuage peut venir d'un clip : tolérance de durée d'une vidéo.
+        var best = JamMatch.Best(track, hits, h => new JamCandidate(h.Track.Title, h.Track.Artist, h.Track.DurationSeconds, h.Track.Isrc, JamSourceKind.Video));
+        _log.LogInformation("Jam : « {Title} » — {Artist} vers Spotify : {Count} résultat(s) → {Chosen}",
+            track.Title, track.Artist, hits.Count, best is { } b ? $"« {b.Item.Track.Title} » — {b.Item.Track.Artist} ({b.Verdict.Reason}, {b.Verdict.Score})" : "aucun sûr");
+        if (best is not { } chosen) return JamCommandResult.NotOnSpotify;
+        var queued = await SendAsync(SpotifyClient.QueueCommand(chosen.Item.Uri), ct);
+        if (queued != JamCommandResult.Sent || !playNow) return queued;
+        return await SendAsync(SpotifyClient.ControlCommand(JamControl.Next, null)!, ct);
+    }
+
     /// <summary>Quitte le Jam côté Spotify (au mieux, sans bloquer l'arrêt) : on cesse d'y apparaître comme membre.</summary>
     private async Task LeaveSessionAsync()
     {
@@ -540,3 +579,13 @@ public sealed class JamFollower : IAsyncDisposable
 
     private static readonly TimeSpan LeaveTimeout = TimeSpan.FromSeconds(5);
 }
+
+public enum JamCommandResult
+{
+    Sent,
+    NotReady,
+    Refused,
+    /// <summary>Le titre de SonNuage n'a pas d'équivalent sûr sur Spotify.</summary>
+    NotOnSpotify,
+}
+

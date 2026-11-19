@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using SonNuage.Contracts;
 
 namespace SonNuage.Server.Jam;
@@ -9,6 +10,9 @@ public sealed record SpotifyRefresh(string AccessToken, DateTimeOffset ExpiresAt
 
 /// <summary>Hôtes d'API Spotify résolus dynamiquement (apresolve) : façade « spclient » et aiguilleur « dealer ».</summary>
 public sealed record SpotifyHosts(string SpClient, string Dealer);
+
+/// <summary>Un titre trouvé par une recherche Spotify.</summary>
+public sealed record SpotifySearchHit(string Uri, JamTrackDto Track);
 
 /// <summary>Un membre d'un Jam.</summary>
 public sealed record JamMember(string Id, string DisplayName, bool IsOwner);
@@ -254,6 +258,132 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
         using var res = await http.SendAsync(req, ct);
         log.LogInformation("Jam quitté : {Status}", (int)res.StatusCode);
         return res.IsSuccessStatusCode;
+    }
+
+    /// <summary>
+    /// Cherche des titres sur Spotify : l'API Web d'abord (avec ISRC), sinon la recherche de l'appli (searchview).
+    /// Les résultats sont bruts : c'est <see cref="JamMatch"/> qui décide lequel est le bon.
+    /// </summary>
+    public async Task<IReadOnlyList<SpotifySearchHit>> SearchAsync(SpotifyHosts? hosts, string accessToken, string query, CancellationToken ct)
+    {
+        var urls = new List<string> { $"https://api.spotify.com/v1/search?type=track&limit=10&q={Uri.EscapeDataString(query)}" };
+        if (hosts is not null)
+            urls.Add($"{hosts.SpClient}/searchview/km/v4/search/{Uri.EscapeDataString(query)}?entityVersion=2&limit=10&catalogue=&country=from_token&locale=fr");
+        foreach (var url in urls)
+        {
+            try
+            {
+                using var req = Get(url, accessToken);
+                using var res = await http.SendAsync(req, ct);
+                if (res.IsSuccessStatusCode)
+                {
+                    var hits = ParseSearch(await res.Content.ReadAsByteArrayAsync(ct));
+                    log.LogInformation("Jam : recherche Spotify ({Source}) « {Query} » : {Count} titre(s)", new Uri(url).Host, query, hits.Count);
+                    return hits;
+                }
+                log.LogInformation("Jam : recherche Spotify ({Source}) : {Status}", new Uri(url).Host, (int)res.StatusCode);
+            }
+            catch (HttpRequestException ex)
+            {
+                log.LogInformation("Jam : recherche Spotify ({Source}) impossible : {Error}", new Uri(url).Host, ex.Message);
+            }
+        }
+        return [];
+    }
+
+    /// <summary>Résultats de l'API Web (<c>tracks.items</c>) ou de searchview (<c>results.tracks.hits</c>) ; titres seulement.</summary>
+    public static IReadOnlyList<SpotifySearchHit> ParseSearch(byte[] json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return [];
+            JsonElement list = default;
+            var found = root.TryGetProperty("tracks", out var tr) && tr.ValueKind == JsonValueKind.Object && tr.TryGetProperty("items", out list)
+                || root.TryGetProperty("results", out var rs) && rs.ValueKind == JsonValueKind.Object
+                   && rs.TryGetProperty("tracks", out var rt) && rt.ValueKind == JsonValueKind.Object && rt.TryGetProperty("hits", out list);
+            if (!found || list.ValueKind != JsonValueKind.Array) return [];
+            var hits = new List<SpotifySearchHit>();
+            foreach (var item in list.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object || Text(item, "uri") is not { } uri || !uri.StartsWith("spotify:track:", StringComparison.Ordinal)) continue;
+                if (Text(item, "name") is not { Length: > 0 } name) continue;
+                var artists = item.TryGetProperty("artists", out var ar) && ar.ValueKind == JsonValueKind.Array
+                    ? ar.EnumerateArray().Where(a => a.ValueKind == JsonValueKind.Object).Select(a => Text(a, "name")).Where(n => !string.IsNullOrEmpty(n))
+                    : [];
+                var ms = item.TryGetProperty("duration_ms", out var dm) && dm.ValueKind == JsonValueKind.Number ? dm.GetDouble()
+                    : item.TryGetProperty("duration", out var du) && du.ValueKind == JsonValueKind.Number ? du.GetDouble() : 0;
+                var isrc = item.TryGetProperty("external_ids", out var ids) && ids.ValueKind == JsonValueKind.Object ? Text(ids, "isrc") : null;
+                hits.Add(new SpotifySearchHit(uri, new JamTrackDto(name, string.Join(", ", artists), null, ms / 1000.0, isrc)));
+            }
+            return hits;
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Commande du lecteur de l'hôte, au format connect-state (<c>{"endpoint":"pause"}</c>…). Null si la commande est
+    /// incomplète (un saut sans position).
+    /// </summary>
+    public static JsonObject? ControlCommand(JamControl action, double? positionSeconds)
+    {
+        JsonObject command = action switch
+        {
+            JamControl.Pause => new() { ["endpoint"] = "pause" },
+            JamControl.Resume => new() { ["endpoint"] = "resume" },
+            JamControl.Next => new() { ["endpoint"] = "skip_next" },
+            JamControl.Previous => new() { ["endpoint"] = "skip_prev" },
+            // « value » pour les anciens lecteurs, « position » + « relative » pour les récents.
+            JamControl.Seek when positionSeconds is { } seconds => new()
+            {
+                ["endpoint"] = "seek_to", ["value"] = Ms(seconds), ["position"] = Ms(seconds), ["relative"] = "beginning",
+            },
+            _ => null!,
+        };
+        return command is null ? null : Logged(command);
+        static long Ms(double seconds) => (long)Math.Round(Math.Max(0, seconds) * 1000);
+    }
+
+    /// <summary>Ajoute un titre à la file de l'hôte (dans un Jam : la file commune).</summary>
+    public static JsonObject QueueCommand(string trackUri) => Logged(new JsonObject
+    {
+        ["endpoint"] = "add_to_queue",
+        ["track"] = new JsonObject
+        {
+            ["uri"] = trackUri,
+            ["metadata"] = new JsonObject { ["is_queued"] = "true" },
+            ["provider"] = "queue",
+        },
+    });
+
+    private static JsonObject Logged(JsonObject command)
+    {
+        command["logging_params"] = new JsonObject { ["command_id"] = Guid.NewGuid().ToString("N") };
+        return command;
+    }
+
+    /// <summary>
+    /// Envoie une commande de notre appareil à celui de l'hôte (<c>connect-state/v1/player/command/from/…/to/…</c>).
+    /// Rend le code HTTP : 200 accepté ; 403 si le Jam ne nous laisse pas piloter.
+    /// </summary>
+    public async Task<int> CommandAsync(SpotifyHosts hosts, string accessToken, string fromDevice, string toDevice, JsonObject command, CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Post,
+            $"{hosts.SpClient}/connect-state/v1/player/command/from/{Uri.EscapeDataString(fromDevice)}/to/{Uri.EscapeDataString(toDevice)}")
+        {
+            Content = new StringContent(new JsonObject { ["command"] = command }.ToJsonString(), System.Text.Encoding.UTF8, "application/json"),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using var res = await http.SendAsync(req, ct);
+        var status = (int)res.StatusCode;
+        if (res.IsSuccessStatusCode) log.LogInformation("Jam : commande {Endpoint} envoyée ({Status})", command["endpoint"], status);
+        else log.LogWarning("Jam : commande {Endpoint} refusée ({Status}) : {Body}", command["endpoint"], status,
+            (await res.Content.ReadAsStringAsync(ct)) is { Length: > 300 } b ? b[..300] : await res.Content.ReadAsStringAsync(ct));
+        return status;
     }
 
     /// <summary>

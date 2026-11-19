@@ -10,8 +10,9 @@ namespace SonNuage.Server.Jam;
 /// <param name="PositionMs">Position connue à l'instant <see cref="TimestampUnixMs"/>.</param>
 /// <param name="ServerTimestampMs">Horloge des serveurs Spotify à l'envoi (<c>server_timestamp_ms</c>), 0 si absente : sert
 /// à estimer l'écart entre leur horloge et la nôtre (temps de vol compris).</param>
+/// <param name="ActiveDeviceId">L'appareil qui joue chez l'hôte : la cible des commandes (pause, saut, file).</param>
 public sealed record ClusterState(string? TrackUri, string? Title, long PositionMs, long TimestampUnixMs, bool IsPaused, long DurationMs,
-    IReadOnlyList<string>? NextTrackUris = null, long ServerTimestampMs = 0)
+    IReadOnlyList<string>? NextTrackUris = null, long ServerTimestampMs = 0, string? ActiveDeviceId = null)
 {
     public string? TrackId => TrackUri is { } uri && uri.StartsWith("spotify:track:", StringComparison.Ordinal) ? uri["spotify:track:".Length..] : null;
 
@@ -63,7 +64,7 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
     private static ClusterState? FromCluster(JsonElement cluster)
     {
         if (cluster.ValueKind != JsonValueKind.Object || !cluster.TryGetProperty("player_state", out var ps) || FromPlayerState(ps) is not { } state) return null;
-        return state with { ServerTimestampMs = Num(cluster, "server_timestamp_ms") };
+        return state with { ServerTimestampMs = Num(cluster, "server_timestamp_ms"), ActiveDeviceId = Text(cluster, "active_device_id") };
     }
 
     private static ClusterState? FromPlayerState(JsonElement ps)
@@ -121,7 +122,8 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
             if (Field(cluster, 3) is not { } playerState) return null; // Cluster.player_state
             long serverTs = 0;
             foreach (var f in Fields(cluster)) if (f.Field == 9 && f.Wire == 0) serverTs = f.Varint; // Cluster.server_timestamp_ms
-            return FromPlayerStateProto(playerState) is { } s ? s with { ServerTimestampMs = serverTs } : null;
+            var device = Field(cluster, 2) is { } d ? System.Text.Encoding.UTF8.GetString(d) : null; // Cluster.active_device_id
+            return FromPlayerStateProto(playerState) is { } s ? s with { ServerTimestampMs = serverTs, ActiveDeviceId = device } : null;
         }
         catch (Exception)
         {

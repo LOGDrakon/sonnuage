@@ -259,4 +259,61 @@ public sealed class JamTests
         Assert.Null(SpotifyClient.ParseTrackMetadata(Encoding.UTF8.GetBytes("""{"name":""}""")));
         Assert.Null(SpotifyClient.ParseTrackMetadata(Encoding.UTF8.GetBytes("<html>")));
     }
+
+    [Fact]
+    public void The_host_device_is_read_from_the_cluster()
+    {
+        // Les commandes (pause, saut, file) visent l'appareil qui joue chez l'hôte.
+        var json = """{"cluster":{"active_device_id":"abc123","player_state":{"track":{"uri":"spotify:track:x"}}}}""";
+        Assert.Equal("abc123", ClusterState.ParseClusterUpdate(Encoding.UTF8.GetBytes(json))?.ActiveDeviceId);
+    }
+
+    [Theory]
+    [InlineData(JamControl.Pause, null, """{"endpoint":"pause"}""")]
+    [InlineData(JamControl.Resume, null, """{"endpoint":"resume"}""")]
+    [InlineData(JamControl.Next, null, """{"endpoint":"skip_next"}""")]
+    [InlineData(JamControl.Previous, null, """{"endpoint":"skip_prev"}""")]
+    [InlineData(JamControl.Seek, 61.5, """{"endpoint":"seek_to","value":61500,"position":61500,"relative":"beginning"}""")]
+    public void Controls_become_connect_state_commands(JamControl action, double? seconds, string expected)
+    {
+        var command = SpotifyClient.ControlCommand(action, seconds)!;
+        command.Remove("logging_params");
+        Assert.Equal(expected, command.ToJsonString());
+    }
+
+    [Fact]
+    public void A_seek_without_a_position_is_not_a_command() =>
+        Assert.Null(SpotifyClient.ControlCommand(JamControl.Seek, null));
+
+    [Fact]
+    public void A_queued_track_is_marked_as_queued()
+    {
+        var command = SpotifyClient.QueueCommand("spotify:track:abc");
+        command.Remove("logging_params");
+        Assert.Equal("""{"endpoint":"add_to_queue","track":{"uri":"spotify:track:abc","metadata":{"is_queued":"true"},"provider":"queue"}}""", command.ToJsonString());
+    }
+
+    [Fact]
+    public void Web_api_search_results_are_read()
+    {
+        var json = """
+            {"tracks":{"items":[
+              {"uri":"spotify:track:a","name":"Hide and Seek","duration_ms":272000,"artists":[{"name":"Imogen Heap"}],"external_ids":{"isrc":"GBAHS0500183"}},
+              {"uri":"spotify:episode:x","name":"Podcast"},
+              {"name":"no uri"}]}}
+            """;
+        var hits = SpotifyClient.ParseSearch(Encoding.UTF8.GetBytes(json));
+        var hit = Assert.Single(hits);
+        Assert.Equal("spotify:track:a", hit.Uri);
+        Assert.Equal(new JamTrackDto("Hide and Seek", "Imogen Heap", null, 272, "GBAHS0500183"), hit.Track);
+    }
+
+    [Fact]
+    public void Searchview_results_are_read()
+    {
+        var json = """{"results":{"tracks":{"hits":[{"uri":"spotify:track:b","name":"Song","duration":200000,"artists":[{"name":"A"},{"name":"B"}]}]}}}""";
+        var hit = Assert.Single(SpotifyClient.ParseSearch(Encoding.UTF8.GetBytes(json)));
+        Assert.Equal(new JamTrackDto("Song", "A, B", null, 200, null), hit.Track);
+        Assert.Empty(SpotifyClient.ParseSearch(Encoding.UTF8.GetBytes("<html>")));
+    }
 }

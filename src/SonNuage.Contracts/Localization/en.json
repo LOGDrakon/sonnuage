@@ -257,6 +257,9 @@
       "link": "Invalid Jam link.",
       "badLink": "Couldn’t read a Jam from this link.",
       "refused": "Spotify won’t let you into this Jam: it may have ended, or the host removed you.",
+      "notOnSpotify": "This track wasn’t found on Spotify (same song, same version), so it can’t be played in the Jam.",
+      "notFollowing": "No Jam is being followed, or the host isn’t playing anything right now.",
+      "controlRefused": "Spotify refused this command: the Jam host may not let guests control playback.",
       "notConnected": "Connect your Spotify account first."
     }
   },

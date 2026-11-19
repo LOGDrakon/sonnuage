@@ -10,6 +10,8 @@ public static class Jam
 {
     public const string Route = "api/me/jam";
     public const string StreamRoute = Route + "/stream";
+    public const string ControlRoute = Route + "/control";
+    public const string QueueRoute = Route + "/queue";
 
     /// <summary>Événement du flux : l'état courant du Jam (JSON de <see cref="JamStateDto"/>).</summary>
     public const string StateEvent = "state";
@@ -94,3 +96,23 @@ public sealed record JamStateDto(
 {
     public static readonly JamStateDto Inactive = new(false, Jam.Spotify, JamAudio.RemoteOnly, null, null, false, 0, 0, JamResolve.Pending, null);
 }
+
+/// <summary>Commande envoyée au lecteur de l'hôte (Spotify) depuis SonNuage.</summary>
+public enum JamControl
+{
+    Pause,
+    Resume,
+    /// <summary>Aller à <see cref="JamControlRequest.PositionSeconds"/> dans le titre en cours.</summary>
+    Seek,
+    Next,
+    Previous,
+}
+
+public sealed record JamControlRequest(JamControl Action, double? PositionSeconds = null);
+
+/// <summary>
+/// Faire jouer un titre de SonNuage dans le Jam : il est cherché sur Spotify (même enregistrement, voir
+/// <see cref="JamMatch"/>) puis ajouté à la file de l'hôte ; <paramref name="PlayNow"/> le lance aussitôt.
+/// </summary>
+public sealed record JamQueueRequest(Guid TrackId, bool PlayNow);
+

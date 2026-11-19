@@ -75,6 +75,13 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
     }
 
     /// <summary>Arrête de suivre : l'état redevient inactif pour tous les appareils du compte.</summary>
+    /// <summary>Commande au lecteur de l'hôte du Jam suivi par ce compte ; NotReady s'il n'en suit aucun.</summary>
+    public Task<JamCommandResult> SendAsync(Guid userId, System.Text.Json.Nodes.JsonObject command, CancellationToken ct) =>
+        _followers.TryGetValue(userId, out var follower) ? follower.SendAsync(command, ct) : Task.FromResult(JamCommandResult.NotReady);
+
+    public Task<JamCommandResult> QueueAsync(Guid userId, JamTrackDto track, bool playNow, CancellationToken ct) =>
+        _followers.TryGetValue(userId, out var follower) ? follower.QueueAsync(track, playNow, ct) : Task.FromResult(JamCommandResult.NotReady);
+
     public async Task LeaveAsync(Guid userId)
     {
         var gate = Gate(userId);
