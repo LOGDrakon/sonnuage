@@ -1914,6 +1914,7 @@
     "joinHint": "Collez un lien d’invitation au Jam, ou scannez son QR code.",
     "link": "Lien du Jam",
     "scan": "Scanner le QR code",
+    "scanHint": "Visez le QR code du Jam",
     "audio": "Où jouer",
     "remoteOnly": "Hôte seulement",
     "remoteOnlyHint": "Suivre sans plus : le son reste sur l’hôte, rien ne joue ici.",
