@@ -64,13 +64,18 @@ public sealed class YoutubeDirect
         }
     }
 
-    /// <summary>Trouve le titre sur YouTube Music et rend son flux audio, ou null.</summary>
-    public async Task<YoutubeAudio?> FindAsync(string title, string artist, double durationSeconds, CancellationToken ct = default)
+    /// <summary>
+    /// Trouve le titre de l'hôte sur YouTube Music et rend son flux audio, ou null si aucun résultat n'est sûr (voir
+    /// <see cref="JamMatch"/>). Par ISRC d'abord : YouTube Music indexe l'ISRC des titres fournis par les labels, le bon
+    /// enregistrement sort alors en tête. Puis par artiste et titre.
+    /// </summary>
+    public async Task<YoutubeAudio?> FindAsync(JamTrackDto host, CancellationToken ct = default)
     {
         if (!Supported) return null;
         try
         {
-            var videoId = await SearchAsync($"{artist} {title}".Trim(), durationSeconds, ct);
+            var videoId = host.Isrc is { Length: > 0 } isrc ? await SearchAsync(isrc, host, ct) : null;
+            videoId ??= await SearchAsync($"{host.Artist} {host.Title}".Trim(), host, ct);
             return videoId is null ? null : await AudioAsync(videoId, ct);
         }
         catch (Exception ex) when (IsTransient(ex))
@@ -142,7 +147,7 @@ public sealed class YoutubeDirect
         }
     }
 
-    private async Task<string?> SearchAsync(string query, double durationSeconds, CancellationToken ct)
+    private async Task<string?> SearchAsync(string query, JamTrackDto host, CancellationToken ct)
     {
         var visitor = await VisitorAsync(false, ct);
         var body = new JsonObject
@@ -168,36 +173,41 @@ public sealed class YoutubeDirect
         using var res = await _http.SendAsync(req, ct);
         res.EnsureSuccessStatusCode();
         var root = JsonNode.Parse(await res.Content.ReadAsStreamAsync(ct));
-        return PickSong(root, durationSeconds);
+        return PickSong(root, host);
     }
 
     /// <summary>
-    /// Premier résultat « Titre » dont la durée colle à celle de Spotify (±max(6 s, 4 %)), sinon le premier tout court.
+    /// Le résultat « Titre » le mieux noté par <see cref="JamMatch"/> (même enregistrement : durée, version, artiste,
+    /// titre ; l'ordre de YouTube départage). Null sinon : l'appelant se rabat sur l'import du serveur plutôt que de
+    /// jouer un autre morceau.
     /// </summary>
-    public static string? PickSong(JsonNode? root, double durationSeconds)
+    public static string? PickSong(JsonNode? root, JamTrackDto host)
     {
         var sections = root?["contents"]?["tabbedSearchResultsRenderer"]?["tabs"]?[0]?["tabRenderer"]?["content"]?["sectionListRenderer"]?["contents"]?.AsArray();
         if (sections is null) return null;
-        string? first = null;
-        var tolerance = Math.Max(6, durationSeconds * 0.04);
-        foreach (var section in sections)
-        {
-            var items = section?["musicShelfRenderer"]?["contents"]?.AsArray();
-            if (items is null) continue;
-            foreach (var item in items)
-            {
-                var r = item?["musicResponsiveListItemRenderer"];
-                var videoId = r?["playlistItemData"]?["videoId"]?.GetValue<string>();
-                if (videoId is null) continue;
-                first ??= videoId;
-                if (durationSeconds <= 0) return videoId;
-                var runs = r?["flexColumns"]?[1]?["musicResponsiveListItemFlexColumnRenderer"]?["text"]?["runs"]?.AsArray();
-                var seconds = runs?.Select(x => ParseDuration(x?["text"]?.GetValue<string>())).LastOrDefault(d => d > 0) ?? 0;
-                if (seconds > 0 && Math.Abs(seconds - durationSeconds) <= tolerance) return videoId;
-            }
-        }
-        return first;
+        var songs = sections
+            .SelectMany(section => section?["musicShelfRenderer"]?["contents"]?.AsArray() ?? [])
+            .Select(item => item?["musicResponsiveListItemRenderer"])
+            .Select(r => (VideoId: r?["playlistItemData"]?["videoId"]?.GetValue<string>(), Renderer: r))
+            .Where(x => x.VideoId is not null);
+        return JamMatch.Best(host, songs, x => Song(x.Renderer))?.Item.VideoId;
     }
+
+    /// <summary>
+    /// Un résultat « Titre » : colonne 0 le titre, colonne 1 « Artiste • Album • 3:04 » (l'artiste peut tenir sur
+    /// plusieurs runs : « A, B & C »).
+    /// </summary>
+    private static JamCandidate Song(JsonNode? renderer)
+    {
+        var title = string.Concat(Runs(renderer, 0).Select(x => x?["text"]?.GetValue<string>()));
+        var details = Runs(renderer, 1).Select(x => x?["text"]?.GetValue<string>() ?? "").ToList();
+        var artist = string.Concat(details.TakeWhile(t => t.Trim() != "•"));
+        var seconds = details.Select(ParseDuration).LastOrDefault(d => d > 0);
+        return new JamCandidate(title, artist, seconds, null, JamSourceKind.Audio);
+    }
+
+    private static IEnumerable<JsonNode?> Runs(JsonNode? renderer, int column) =>
+        renderer?["flexColumns"]?[column]?["musicResponsiveListItemFlexColumnRenderer"]?["text"]?["runs"]?.AsArray() ?? [];
 
     /// <summary>« 3:04 » ou « 1:02:03 » en secondes, 0 sinon.</summary>
     public static double ParseDuration(string? text)

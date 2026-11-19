@@ -177,15 +177,19 @@ public sealed class JamTests
     }
 
     [Fact]
-    public void An_import_keeps_a_well_scored_match_over_a_weak_one_with_the_right_duration()
+    public void An_import_takes_the_surest_recording_and_never_another_version()
     {
-        RankedEntry Ranked(string id, int score, double duration) => new(new YtEntry(id, id, null, duration, null), score);
-        var good = Ranked("good", 80, 210);
-        var exactButWeak = Ranked("weak", 30, 200);
+        RankedEntry Ranked(string id, int score, double duration, string? title = null) =>
+            new(new YtEntry(id, title ?? "Artist - Song (Official Video)", "Artist", duration, null), score);
+        var song = new JamTrackDto("Song", "Artist", null, 200, null);
 
-        Assert.Equal("good", JamResolver.PickImport([good, exactButWeak], targetSeconds: 200)?.Entry.Id);
-        Assert.Equal("exact", JamResolver.PickImport([good, Ranked("exact", 60, 201)], targetSeconds: 200)?.Entry.Id);
-        Assert.Null(JamResolver.PickImport([exactButWeak], targetSeconds: 200));
+        // Le meilleur verdict gagne ; à égalité, le classement de la recherche départage.
+        Assert.Equal("exact", JamResolver.PickImport([Ranked("near", 90, 214), Ranked("exact", 60, 200)], song)?.Entry.Id);
+        Assert.Equal("first", JamResolver.PickImport([Ranked("second", 50, 200), Ranked("first", 80, 200)], song)?.Entry.Id);
+        // Un remix bien classé ne remplace pas l'original ; une durée trop éloignée non plus ; un autre titre non plus.
+        Assert.Null(JamResolver.PickImport([Ranked("remix", 90, 200, "Artist - Song (Sare Remix)")], song));
+        Assert.Null(JamResolver.PickImport([Ranked("long", 90, 260)], song));
+        Assert.Null(JamResolver.PickImport([Ranked("other", 90, 200, "Artist - Another Tune")], song));
     }
 
     [Fact]
@@ -230,5 +234,29 @@ public sealed class JamTests
 
         var playing = paused with { IsPaused = false };
         Assert.Equal(40, playing.PositionSecondsAt(at.AddSeconds(10)), precision: 0);
+    }
+
+    [Theory]
+    [InlineData("4uLU6hMCjMI75M1A2tKUQC", "93bc414a606747b2b612491ef83d5a3e")]
+    [InlineData("0000000000000000000000", "00000000000000000000000000000000")]
+    [InlineData("not-base62!", null)]
+    [InlineData("", null)]
+    public void A_track_id_becomes_the_metadata_gid(string id, string? gid) =>
+        Assert.Equal(gid, SpotifyClient.TrackGid(id));
+
+    [Fact]
+    public void Track_metadata_gives_the_isrc_and_every_artist()
+    {
+        var json = """
+            {"gid":"k7xBSmBnR7K2EkkfJD1aPg==","name":"Stereo Hearts (feat. Adam Levine)",
+             "album":{"name":"The Papercut Chronicles II"},
+             "artist":[{"name":"Gym Class Heroes"},{"name":"Adam Levine"}],
+             "duration":210960,
+             "external_id":[{"type":"isrc","id":"USAT21101321"}]}
+            """;
+        var track = SpotifyClient.ParseTrackMetadata(Encoding.UTF8.GetBytes(json));
+        Assert.Equal(new JamTrackDto("Stereo Hearts (feat. Adam Levine)", "Gym Class Heroes, Adam Levine", "The Papercut Chronicles II", 210.96, "USAT21101321"), track);
+        Assert.Null(SpotifyClient.ParseTrackMetadata(Encoding.UTF8.GetBytes("""{"name":""}""")));
+        Assert.Null(SpotifyClient.ParseTrackMetadata(Encoding.UTF8.GetBytes("<html>")));
     }
 }

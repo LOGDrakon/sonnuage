@@ -83,11 +83,76 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
     }
 
     /// <summary>
-    /// Métadonnées propres d'un titre (titre, artistes) via la page d'intégration publique
-    /// <c>open.spotify.com/embed/track/{id}</c> — sans authentification, et sans la limite de débit sévère de l'API Web
-    /// sur ce client id. L'album et la durée, quand ils manquent ici, viennent du cluster. Pas d'ISRC.
+    /// Métadonnées d'un titre : d'abord celles de l'appli Spotify (<c>metadata/4/track</c> sur spclient, avec l'ISRC
+    /// qui identifie l'enregistrement), sinon la page d'intégration publique (titre et artistes seulement).
     /// </summary>
-    public async Task<JamTrackDto?> TrackAsync(string accessToken, string trackId, CancellationToken ct)
+    public async Task<JamTrackDto?> TrackAsync(SpotifyHosts? hosts, string accessToken, string trackId, CancellationToken ct)
+    {
+        if (hosts is not null && TrackGid(trackId) is { } gid)
+        {
+            try
+            {
+                using var req = Get($"{hosts.SpClient}/metadata/4/track/{gid}?market=from_token", accessToken);
+                using var res = await http.SendAsync(req, ct);
+                if (res.IsSuccessStatusCode && ParseTrackMetadata(await res.Content.ReadAsByteArrayAsync(ct)) is { } meta) return meta;
+                log.LogDebug("Métadonnées Spotify de {Track} : {Status}, page d'intégration en secours", trackId, (int)res.StatusCode);
+            }
+            catch (HttpRequestException ex)
+            {
+                log.LogDebug(ex, "Métadonnées Spotify de {Track} indisponibles, page d'intégration en secours", trackId);
+            }
+        }
+        return await EmbedTrackAsync(trackId, ct);
+    }
+
+    /// <summary>Identifiant base62 d'un titre (22 caractères) en gid hexadécimal (16 octets) ; null s'il est invalide.</summary>
+    public static string? TrackGid(string trackId)
+    {
+        const string alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        if (trackId.Length != 22) return null;
+        var n = System.Numerics.BigInteger.Zero;
+        foreach (var c in trackId)
+        {
+            var digit = alphabet.IndexOf(c);
+            if (digit < 0) return null;
+            n = n * 62 + digit;
+        }
+        var bytes = n.ToByteArray(isUnsigned: true, isBigEndian: true);
+        if (bytes.Length > 16) return null;
+        return Convert.ToHexStringLower(new byte[16 - bytes.Length].Concat(bytes).ToArray());
+    }
+
+    /// <summary>Réponse JSON de <c>metadata/4/track</c> : nom, artistes, album, durée (ms), ISRC. Null si illisible.</summary>
+    public static JamTrackDto? ParseTrackMetadata(byte[] json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || Text(root, "name") is not { Length: > 0 } name) return null;
+            var artists = root.TryGetProperty("artist", out var ar) && ar.ValueKind == JsonValueKind.Array
+                ? ar.EnumerateArray().Where(a => a.ValueKind == JsonValueKind.Object).Select(a => Text(a, "name")).Where(n => !string.IsNullOrEmpty(n))
+                : [];
+            var album = root.TryGetProperty("album", out var al) && al.ValueKind == JsonValueKind.Object ? Text(al, "name") : null;
+            var duration = root.TryGetProperty("duration", out var du) && du.ValueKind == JsonValueKind.Number ? du.GetDouble() / 1000.0 : 0;
+            string? isrc = null;
+            if (root.TryGetProperty("external_id", out var ids) && ids.ValueKind == JsonValueKind.Array)
+                isrc = ids.EnumerateArray()
+                    .Where(i => i.ValueKind == JsonValueKind.Object && string.Equals(Text(i, "type"), "isrc", StringComparison.OrdinalIgnoreCase))
+                    .Select(i => Text(i, "id")).FirstOrDefault(i => !string.IsNullOrEmpty(i));
+            return new JamTrackDto(name, string.Join(", ", artists), album, duration, isrc);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Titre et artistes via la page d'intégration publique <c>open.spotify.com/embed/track/{id}</c> : sans
+    /// authentification ni limite de débit de l'API Web. Pas d'ISRC.
+    /// </summary>
+    private async Task<JamTrackDto?> EmbedTrackAsync(string trackId, CancellationToken ct)
     {
         using var res = await http.GetAsync($"https://open.spotify.com/embed/track/{Uri.EscapeDataString(trackId)}", ct);
         if (!res.IsSuccessStatusCode) return null;

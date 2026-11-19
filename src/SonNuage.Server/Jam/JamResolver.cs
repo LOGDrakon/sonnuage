@@ -12,37 +12,24 @@ public sealed record JamResolution(JamResolve State, TrackDto? Track, string? Vi
 
 /// <summary>
 /// Retrouve le titre d'un Jam dans la bibliothèque, sinon lance (si autorisé) son import depuis YouTube et renvoie
-/// l'avancement. La correspondance se fait sur le titre et l'artiste (sans casse ni accents), la durée départageant.
+/// l'avancement. Chaque candidat passe par <see cref="JamMatch.Evaluate"/> (durée, version, artiste, titre, ISRC) et
+/// chaque décision est journalisée avec sa raison.
 /// </summary>
 public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft.Extensions.Options.IOptions<SonNuageOptions> options, ILogger<JamResolver> log)
 {
-    /// <summary>Durée tolérée entre le titre du Jam et une piste de la bibliothèque.</summary>
-    private const double DurationToleranceSeconds = 12;
-
-    /// <summary>
-    /// Pour un Jam on importe plus volontiers qu'une demande normale : l'utilisateur veut suivre un titre précis et
-    /// connu, et un bon candidat (surtout une chaîne « - Topic » à la bonne durée) vaut mieux que rien. On exige quand
-    /// même un score correct pour éviter un faux positif (une durée exacte ne suffit pas).
-    /// </summary>
-    private const int JamImportMinScore = 45;
-
-    /// <summary>Durée YouTube acceptée comme « la même » que celle de l'hôte.</summary>
-    private const double ImportDurationToleranceSeconds = 6;
-
     /// <summary>Cherche dans la bibliothèque. Trouvé : la piste ; sinon null.</summary>
     public async Task<TrackDto?> FindInLibraryAsync(SonNuageDbContext db, Guid userId, JamTrackDto track, CancellationToken ct)
     {
         var titleKey = NameNormalizer.Key(track.Title);
-        var artistKey = NameNormalizer.Key(track.Artist);
         if (titleKey.Length == 0) return null;
         // SearchKey commence par la clé du titre (voir LibraryIndexer) : un titre identique se filtre en base, au lieu de
         // trier en mémoire 200 pistes prises au hasard parmi celles qui contiennent le mot (« Home », « Intro »…).
         var prefix = titleKey + " ";
         var candidates = await db.Tracks.AsNoTracking().Where(t => t.SearchKey.StartsWith(prefix)).Take(500).ToListAsync(ct);
-        var match = candidates
-            .Where(t => NameNormalizer.Key(t.Title) == titleKey && ArtistMatches(t.ArtistName, track.Artist))
-            .OrderBy(t => track.DurationSeconds > 0 ? Math.Abs(t.DurationSeconds - track.DurationSeconds) : 0)
-            .FirstOrDefault();
+        // Origine des fichiers inconnue (souvent un clip importé) : tolérance de durée d'une vidéo.
+        var best = JamMatch.Best(track, candidates, t => new JamCandidate(t.Title, t.ArtistName, t.DurationSeconds, null, JamSourceKind.Video));
+        Trace(track, "bibliothèque", candidates.Count, best is { } b ? $"« {b.Item.Title} » — {b.Item.ArtistName}" : null, best?.Verdict);
+        var match = best?.Item;
         if (match is null) return null;
         var dto = await LibraryEndpoints.TracksInOrderAsync(db, userId, [match.Id], ct);
         return dto.FirstOrDefault();
@@ -70,10 +57,11 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
     {
         try
         {
-            var target = track.DurationSeconds > 0 ? track.DurationSeconds : (double?)null;
-            var query = new MatchQuery(track.Artist, track.Title, target);
+            var query = new MatchQuery(track.Artist, track.Title, track.DurationSeconds > 0 ? track.DurationSeconds : null);
             var ranked = await ytDlp.MatchAsync(query, options.Value.MatchOfficialMinScore, ct);
-            if (PickImport(ranked, target) is not { } best) return null;
+            var best = PickImport(ranked, track);
+            Trace(track, "import YouTube", ranked.Count, best is { } p ? $"« {p.Entry.Title} » — {p.Entry.Channel}" : null, null);
+            if (best is null) return null;
             var e = best.Entry;
             var video = new YoutubeVideoDto(e.Id, e.Title, e.Channel, e.DurationSeconds, e.Thumbnail, null, e.Album);
             await importer.EnqueueAsync(db, [video], albumHint: null, subscriptionId: null, ct);
@@ -87,25 +75,16 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
     }
 
     /// <summary>
-    /// Le candidat à importer : d'abord un résultat à la durée de l'hôte, puis le mieux classé, mais toujours avec un
-    /// score suffisant (une durée exacte ne rattrape pas un mauvais titre). Null si aucun ne convient.
+    /// Le candidat à importer : le mieux noté par <see cref="JamMatch"/> (le classement de la recherche départage) ;
+    /// null si aucun n'est sûr. Mieux vaut ne rien importer qu'importer un autre morceau.
     /// </summary>
-    public static RankedEntry? PickImport(IReadOnlyList<RankedEntry> ranked, double? targetSeconds)
-    {
-        var acceptable = ranked.Where(r => r.Score >= JamImportMinScore).ToList();
-        return (targetSeconds is { } d
-                ? acceptable.FirstOrDefault(r => r.Entry.DurationSeconds is { } rd && Math.Abs(rd - d) <= ImportDurationToleranceSeconds)
-                : null)
-            ?? acceptable.FirstOrDefault();
-    }
+    public static RankedEntry? PickImport(IReadOnlyList<RankedEntry> ranked, JamTrackDto track) =>
+        JamMatch.Best(track, ranked.OrderByDescending(r => r.Score),
+            r => new JamCandidate(r.Entry.Title, r.Entry.Channel ?? "", r.Entry.DurationSeconds ?? 0, null, JamSourceKind.Video))?.Item;
 
-    private static bool ArtistMatches(string libraryArtist, string jamArtist)
-    {
-        var libKey = NameNormalizer.Key(libraryArtist);
-        // Le Jam donne parfois plusieurs artistes séparés par des virgules ; il suffit qu'un corresponde.
-        foreach (var part in jamArtist.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
-            if (NameNormalizer.Key(part) == libKey || libKey.Contains(NameNormalizer.Key(part)) || NameNormalizer.Key(part).Contains(libKey))
-                return true;
-        return NameNormalizer.Key(jamArtist) == libKey;
-    }
+    /// <summary>Une ligne par décision : quel titre, où, combien de candidats, lequel et pourquoi.</summary>
+    private void Trace(JamTrackDto track, string where, int count, string? chosen, JamVerdict? verdict) =>
+        log.LogInformation("Jam : « {Title} » — {Artist} ({Isrc}) : {Where}, {Count} candidat(s) → {Chosen}{Reason}",
+            track.Title, track.Artist, track.Isrc ?? "sans ISRC", where, count, chosen ?? "aucun sûr",
+            verdict is { } v ? $" ({v.Reason}, {v.Score})" : "");
 }

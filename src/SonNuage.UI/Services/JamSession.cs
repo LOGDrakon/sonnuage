@@ -380,7 +380,7 @@ public sealed class JamSession : IDisposable
             if (_lookupSource != source)
             {
                 _lookupSource = source;
-                _lookup = _youtube.FindAsync(meta.Title, meta.Artist, meta.DurationSeconds);
+                _lookup = _youtube.FindAsync(meta);
             }
             return _lookup;
         }

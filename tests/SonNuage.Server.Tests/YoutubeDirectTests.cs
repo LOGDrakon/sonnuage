@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using SonNuage.Contracts;
 using SonNuage.UI.Services;
 
 namespace SonNuage.Server.Tests;
@@ -16,10 +17,15 @@ public sealed class YoutubeDirectTests
     public void Durations_are_read_from_result_text(string text, double expected) =>
         Assert.Equal(expected, YoutubeDirect.ParseDuration(text));
 
-    private static JsonNode Songs(params (string Id, string Duration)[] songs)
+    private static JsonNode Songs(params (string Id, string Duration)[] songs) =>
+        Titled(songs.Select(s => (s.Id, "Title", s.Duration)).ToArray());
+
+    private static JamTrackDto Host(string title, double seconds) => new(title, "Artist", null, seconds, null);
+
+    private static JsonNode Titled(params (string Id, string Title, string Duration)[] songs)
     {
         var items = new JsonArray();
-        foreach (var (id, duration) in songs)
+        foreach (var (id, title, duration) in songs)
         {
             JsonObject Column(params string[] texts) => new()
             {
@@ -33,7 +39,7 @@ public sealed class YoutubeDirectTests
                 ["musicResponsiveListItemRenderer"] = new JsonObject
                 {
                     ["playlistItemData"] = new JsonObject { ["videoId"] = id },
-                    ["flexColumns"] = new JsonArray(Column("Title"), Column("Artist", " • ", "Album", " • ", duration)),
+                    ["flexColumns"] = new JsonArray(Column(title), Column("Artist", " • ", "Album", " • ", duration)),
                 },
             });
         }
@@ -61,15 +67,32 @@ public sealed class YoutubeDirectTests
     {
         // Le premier résultat est une version live (4:30) ; la version studio (3:04) colle à Spotify (183 s).
         var root = Songs(("live", "4:30"), ("studio", "3:04"));
-        Assert.Equal("studio", YoutubeDirect.PickSong(root, 183));
+        Assert.Equal("studio", YoutubeDirect.PickSong(root, Host("Title", 183)));
     }
 
     [Fact]
-    public void Without_a_duration_match_the_first_song_wins()
+    public void Without_a_close_duration_nothing_is_picked()
     {
-        Assert.Equal("a", YoutubeDirect.PickSong(Songs(("a", "9:00"), ("b", "8:00")), 183));
-        Assert.Equal("a", YoutubeDirect.PickSong(Songs(("a", "9:00")), 0));
-        Assert.Null(YoutubeDirect.PickSong(JsonNode.Parse("{}"), 183));
+        // Mieux vaut l'import du serveur qu'un autre morceau : aucune durée proche, aucun choix.
+        Assert.Null(YoutubeDirect.PickSong(Songs(("a", "9:00"), ("b", "8:00")), Host("Title", 183)));
+        Assert.Equal("a", YoutubeDirect.PickSong(Songs(("a", "9:00")), Host("Title", 0)));
+        Assert.Null(YoutubeDirect.PickSong(JsonNode.Parse("{}"), Host("Title", 183)));
+    }
+
+    [Fact]
+    public void A_remix_is_not_picked_for_the_original()
+    {
+        // Cas réel : « Hide and Seek » chez l'hôte, le remix sort en premier sur YouTube Music.
+        var root = Titled(("remix", "Hide and Seek (Sare Remix)", "2:23"), ("original", "Hide and Seek", "3:04"));
+        Assert.Equal("original", YoutubeDirect.PickSong(root, Host("Hide and Seek", 183)));
+        Assert.Null(YoutubeDirect.PickSong(Titled(("remix", "Hide and Seek (Sare Remix)", "3:04")), Host("Hide and Seek", 183)));
+    }
+
+    [Fact]
+    public void Another_artist_is_not_picked()
+    {
+        var host = new JamTrackDto("Hide and Seek", "Imogen Heap", null, 183, null);
+        Assert.Null(YoutubeDirect.PickSong(Titled(("other", "Hide and Seek", "3:04")), host));
     }
 
     [Fact]

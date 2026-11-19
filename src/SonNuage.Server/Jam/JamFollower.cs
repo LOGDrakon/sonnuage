@@ -384,8 +384,8 @@ public sealed class JamFollower : IAsyncDisposable
             using (var scope = _scopes.CreateScope())
             {
                 var client = scope.ServiceProvider.GetRequiredService<SpotifyClient>();
-                var meta = await client.TrackAsync(accessToken, trackId, ct);
-                // Titre et artistes : page d'intégration ; durée : celle du cluster si connue (plus fiable).
+                var meta = await client.TrackAsync(_session?.Hosts, accessToken, trackId, ct);
+                // Durée : celle du cluster si connue (celle que joue l'hôte).
                 prep.Meta = meta is null ? null : durationSeconds > 0 ? meta with { DurationSeconds = durationSeconds } : meta;
             }
             if (prep.Meta is null) { Fail(trackId, prep, RetrySoon); return; }
