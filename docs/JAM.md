@@ -21,6 +21,11 @@ propre source. Aucun DRM n'est contourné.
 3. Un bandeau au-dessus du lecteur montre l'hôte et le titre suivi (point coloré : le son joue ici ; gris : il reste
    chez l'hôte). *Quitter le Jam* arrête le suivi et nous retire du Jam côté Spotify.
 4. Si l'hôte termine le Jam ou nous en retire, le bandeau disparaît et « Le Jam est terminé » s'affiche.
+5. En mode **Sur cet appareil aussi**, le lecteur de SonNuage pilote l'hôte : lecture/pause, saut dans le titre,
+   suivant, précédent, « Lire » ou « Ajouter à la file » sur un titre de la bibliothèque. Les boutons de la
+   notification, de l'écran verrouillé, du casque et d'Android Auto aussi (Android).
+6. Un titre sans équivalent sûr s'annonce par une pop-up, dans les deux sens : titre de l'hôte introuvable ici
+   (SonNuage reste muet jusqu'au suivant), ou titre de SonNuage introuvable sur Spotify (rien n'est envoyé).
 
 L'hôte doit avoir ajouté l'invité au Jam (lien de partage) ; un compte jamais invité est refusé par Spotify, et la
 modale l'annonce tout de suite.
@@ -46,15 +51,28 @@ modale l'annonce tout de suite.
   quatre échecs d'affilée, ou un join refusé, le suivi s'arrête aussi. Dans tous les cas l'état inactif est poussé aux
   appareils. Quitter appelle `POST social-connect/v3/sessions/{id}/leave`.
 - **Préparation** : le titre en cours et les deux suivants de la file de l'hôte sont préparés d'avance — métadonnées
-  par la page d'intégration (`open.spotify.com/embed/track/{id}`, l'API Web étant limitée pour ce jeton), bibliothèque
-  (titre + artiste normalisés, la durée départage), sinon import YouTube en mode invité. Un échec passager est retenté
-  (1 min, ou 10 min si la recherche ou l'import a échoué).
+  et **ISRC** par `spclient /metadata/4/track/{gid}` (page d'intégration en secours), bibliothèque, sinon import YouTube
+  en mode invité (la vidéo est importée sous le titre et l'artiste de Spotify, pas sous son propre nom). Un échec
+  passager est retenté (1 min, ou 10 min si la recherche ou l'import a échoué).
+- **Correspondance** (`JamMatch`, une seule règle pour la bibliothèque, l'import, YouTube direct et la recherche
+  Spotify) : la durée colle (audio ±max(6 s, 4 %), vidéo ±max(15 s, 12 %)) ; même ISRC = même enregistrement ;
+  sinon même version (remix, live, accéléré, reprise… dans les suffixes), l'un des artistes présent (« feat. », « & »,
+  « x », virgules séparés), tous les mots du titre et au plus un mot en trop inexpliqué. Le meilleur score gagne ; un
+  doute est un refus. Chaque décision est journalisée (titre, où, candidats, choix et raison).
 - **Diffusion** (`GET /api/me/jam/stream`, Server-Sent Events) : l'état (`JamStateDto`, avec les suivants déjà
   résolus dans `Upcoming`) est poussé à tous les appareils du compte, et renvoyé frais toutes les 10 s.
 - **Lecture en phase** (`JamSession`, appli) : départ directement à la position de l'hôte ; titres suivants mis en
   file pour un enchaînement sans blanc ; écart > 2,5 s → un saut, sinon la vitesse est ajustée de quelques % (hauteur
   conservée) jusqu'à moins de 40 ms. Titre absent du serveur : lecture YouTube directe sur l'appareil
   (`YoutubeDirect`, recherche YouTube Music + flux audio en ~0,5 s), sans changer de source en cours de titre.
+- **Piloter l'hôte** : `POST {spclient}/connect-state/v1/player/command/from/hobs_{id}/to/{appareil actif}` avec
+  `pause`, `resume`, `seek_to`, `skip_next`, `skip_prev`, `add_to_queue` et `play` (« lire maintenant » : remplace le
+  contexte de l'hôte, sa file est gardée). Accepté (202) pour un invité gratuit. Le titre de SonNuage est cherché sur
+  Spotify par la recherche GraphQL du lecteur web (`api-partner.spotify.com/pathfinder/v2/query`, opération
+  `searchTracks`) ; son hash change avec le lecteur web, il est relu dans son code public (cache 12 h), avec la valeur
+  connue en secours. Côté appli, `LinkedPlayer` envoie les commandes de l'utilisateur à `JamSession` (`IPlayerRoute`)
+  tant que le Jam est suivi en mode invité ; la synchro garde la main sur le lecteur local (`PlayerRouting.Bypass`).
+  Sur Android, `JamRoutingPlayer` fait de même pour les contrôleurs autres que l'interface.
 - **Lien court** (`spotify.link/…`) : suivi à la main, en https et vers des hôtes Spotify seulement (chaque
   redirection est revérifiée), pour que le serveur ne puisse pas être envoyé vers une autre adresse.
 
@@ -71,6 +89,8 @@ En mémoire : un redémarrage du serveur arrête les suivis.
 | POST | `/leave` | Arrête de suivre et quitte le Jam côté Spotify. |
 | GET | `/state` | État courant (one-shot). |
 | GET | `/stream` | Flux d'état (SSE). |
+| POST | `/control` | Pause, reprise, saut, suivant, précédent chez l'hôte. 409 si pas prêt, 403 si refusé. |
+| POST | `/queue` | Ajoute un titre de la bibliothèque à la file de l'hôte, ou le lit tout de suite. 404 s'il n'est pas sur Spotify. |
 
 ## Deezer
 
@@ -79,6 +99,10 @@ Deezer en 2025). *Music Together* (ex-Shaker) n'est qu'une playlist commune, san
 Deezer Connect ne relie que les appareils d'un même compte. Un lien Deezer collé est refusé avec un message clair.
 
 ## À faire
+
+- En mode **Hôte seulement**, le lecteur de SonNuage reste local (il ne pilote pas l'hôte) : voulu, pour ne pas
+  confondre la lecture personnelle et le Jam.
+- Choisir un titre de la file dans Android Auto reste local (la synchro le rattrape).
 
 - **Reprise après redémarrage du serveur** (re-suivre automatiquement les Jams actifs).
 - Décider si un **import** déclenché par un Jam doit compter dans le quota quotidien du compte.
