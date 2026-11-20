@@ -129,4 +129,23 @@ public sealed class YoutubeMatcherTests
         Assert.Equal(200, YoutubeMatcher.TypicalDuration([200]));
         Assert.Null(YoutubeMatcher.TypicalDuration([]));
     }
+
+    [Fact]
+    public void The_same_video_found_twice_keeps_what_each_search_knows()
+    {
+        // Cas réel : YouTube Music rend la vidéo sans chaîne ni durée, YouTube la rend complète. Garder la première
+        // seule écartait le titre officiel (« pas d'artiste ») au profit d'une reprise de fan.
+        var query = new MatchQuery("Alfie Castley", "Cardiac Arrest", 147);
+        var ranked = YoutubeMatcher.Rank(query, [
+            Video("Cardiac Arrest", null, null, "y8PIRe9dowM"),
+            Video("[和訳] Cardiac Arrest - Alfie Castley", "Cro_", 147, "fanupload01"),
+            Video("Cardiac Arrest", "Alfie Castley", 147, "y8PIRe9dowM") with { ChannelVerified = true },
+        ]);
+
+        var official = Assert.Single(ranked, r => r.Entry.Id == "y8PIRe9dowM");
+        Assert.Equal("Alfie Castley", official.Entry.Channel);
+        Assert.Equal(147, official.Entry.DurationSeconds);
+        Assert.True(official.Entry.ChannelVerified);
+        Assert.Equal("y8PIRe9dowM", ranked[0].Entry.Id);
+    }
 }

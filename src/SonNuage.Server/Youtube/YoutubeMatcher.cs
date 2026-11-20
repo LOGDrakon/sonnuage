@@ -108,9 +108,22 @@ public static class YoutubeMatcher
     /// une chaîne de paroles bien notée ne l'emporte plus sur le clip officiel.
     /// </summary>
     public static IReadOnlyList<RankedEntry> Rank(MatchQuery query, IEnumerable<YtEntry> entries, int? officialMinScore = null) =>
-        entries.DistinctBy(e => e.Id).Select((e, i) => (Ranked: new RankedEntry(e, Score(query, e)), i))
+        entries.GroupBy(e => e.Id).Select(g => g.Aggregate(Merge)).Select((e, i) => (Ranked: new RankedEntry(e, Score(query, e)), i))
             .OrderByDescending(x => officialMinScore is { } min && x.Ranked.Score >= min && IsOfficial(query.Artist, x.Ranked.Entry))
             .ThenByDescending(x => x.Ranked.Score).ThenBy(x => x.i).Select(x => x.Ranked).ToList();
+
+    /// <summary>
+    /// Une même vidéo trouvée par deux recherches : YouTube Music donne le titre du morceau mais ni chaîne ni durée,
+    /// YouTube les donne. On garde le premier titre et ce que l'autre sait en plus.
+    /// </summary>
+    private static YtEntry Merge(YtEntry first, YtEntry other) => first with
+    {
+        Channel = string.IsNullOrWhiteSpace(first.Channel) ? other.Channel : first.Channel,
+        DurationSeconds = first.DurationSeconds ?? other.DurationSeconds,
+        Thumbnail = first.Thumbnail ?? other.Thumbnail,
+        Album = first.Album ?? other.Album,
+        ChannelVerified = first.ChannelVerified || other.ChannelVerified,
+    };
 
     /// <summary>
     /// Chaîne officielle de l'artiste : son nom, éventuellement habillé (Official, VEVO, This Is, - Topic), collé ou non
