@@ -1931,6 +1931,7 @@
     "waiting": "Waiting for the host to play…",
     "importing": "Importing “{title}” from YouTube…",
     "unavailable": "“{title}” isn’t in your library and couldn’t be imported.",
+    "notFound": "“{title}”, playing on Spotify, wasn’t found (same song, same version): SonNuage stays silent until the next track.",
     "needConnect": "Connect your Spotify account first.",
     "connectOnDevice": "A browser will open to sign in to Spotify, then come back here."
   }

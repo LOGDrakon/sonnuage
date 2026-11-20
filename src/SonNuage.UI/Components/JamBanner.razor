@@ -24,6 +24,7 @@
         Jam.StateChanged += OnChanged;
         Jam.Ended += OnEnded;
         Jam.Failed += OnFailed;
+        Jam.Missing += OnMissing;
         Auth.Changed += OnAuthChanged;
         // Un Jam déjà suivi côté serveur (appli relancée) reprend tout seul.
         await Jam.ResumeAsync();
@@ -68,11 +69,14 @@
 
     private void OnFailed(string message) => InvokeAsync(() => Ui.Notify(L.Server(message), true));
 
+    private void OnMissing(JamTrackDto track) => InvokeAsync(() => Ui.Notify(L["jam.notFound", ("title", track.Title)], true));
+
     public void Dispose()
     {
         Jam.StateChanged -= OnChanged;
         Jam.Ended -= OnEnded;
         Jam.Failed -= OnFailed;
+        Jam.Missing -= OnMissing;
         Auth.Changed -= OnAuthChanged;
     }
 }

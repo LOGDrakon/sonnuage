@@ -109,6 +109,15 @@ public sealed class JamSession : IDisposable, IPlayerRoute
     /// <summary>Une commande envoyée à l'hôte a échoué (titre absent de Spotify, commande refusée…) : message du serveur.</summary>
     public event Action<string>? Failed;
 
+    /// <summary>
+    /// Le titre que joue l'hôte n'a pas d'équivalent sûr ici (ni bibliothèque, ni import, ni YouTube) : le lecteur reste
+    /// muet jusqu'au titre suivant. Une fois par titre.
+    /// </summary>
+    public event Action<JamTrackDto>? Missing;
+
+    /// <summary>Titre de l'hôte déjà signalé introuvable (pour ne le signaler qu'une fois).</summary>
+    private string? _missingSource;
+
     public Task<MusicServiceAccountDto?> SpotifyAccountAsync() => _api.SpotifyAccountAsync();
 
     /// <summary>Rejoint un Jam depuis un lien (ou code). Démarre le suivi en direct.</summary>
@@ -168,6 +177,7 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         _serverClockOffsetMs = null;
         _playingSource = null;
         _playing = null;
+        _missingSource = null;
         _ = _youtube.WarmUpAsync();
         _ = FollowAsync(cts.Token);
         _ = SyncLoopAsync(cts.Token);
@@ -300,7 +310,13 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         }
         if (_playingSource != source)
         {
-            if (await PickTrackAsync(state, source) is not { } pick) return; // rien de jouable pour l'instant
+            if (await PickTrackAsync(state, source) is not { } pick)
+            {
+                // Rien de jouable pour l'instant. Introuvable pour de bon : le titre précédent ne continue pas à contretemps.
+                if (_missingSource == source && _playing is { } previous && _player.State.Current?.Id == previous.Id && _player.State.IsPlaying)
+                    await TogglePlayAsync();
+                return;
+            }
             await StartAsync(state, source, pick);
             return;
         }
@@ -372,7 +388,17 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         if (state is { Resolve: JamResolve.Matched, Resolved: { } library }) return library;
         if (YoutubeLookup(state, source) is not { } lookup) return null;
         var audio = await lookup;
-        if (audio is null || _playingSource == source) return null;
+        if (audio is null)
+        {
+            // Le serveur n'a rien trouvé non plus (bibliothèque, import) : on le dit, une fois.
+            if (state.Resolve == JamResolve.Unavailable && _missingSource != source)
+            {
+                _missingSource = source;
+                Missing?.Invoke(state.Track!);
+            }
+            return null;
+        }
+        if (_playingSource == source) return null;
         var meta = state.Track!;
         return YoutubeTracks.Create(audio.VideoId, meta.Title, meta.Artist, meta.DurationSeconds > 0 ? meta.DurationSeconds : audio.DurationSeconds);
     }
