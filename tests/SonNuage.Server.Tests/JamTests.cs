@@ -225,6 +225,34 @@ public sealed class JamTests
     }
 
     [Fact]
+    public void The_host_view_shows_the_hosts_track_queue_and_position()
+    {
+        var next = new TrackDto(Guid.NewGuid(), "Next", Guid.Empty, "B", Guid.Empty, "", null, null, 180, "flac", true, null, false, false);
+        var state = JamStateDto.Inactive with
+        {
+            Active = true,
+            Audio = JamAudio.RemoteOnly,
+            SourceTrackId = "4uLU6hMCjMI75M1A2tKUQC",
+            Track = new JamTrackDto("Over This", "Artist", null, 200, null),
+            Resolve = JamResolve.Unavailable,
+            IsPlaying = true,
+            Upcoming = [next],
+        };
+
+        var view = SonNuage.UI.Services.JamSession.HostView(state, 61.5);
+
+        Assert.Equal("Over This", view.Current?.Title);
+        Assert.Equal("Artist", view.Current?.ArtistName);
+        Assert.Equal([view.Current!, next], view.Queue);
+        Assert.True(view.IsPlaying);
+        Assert.Equal(61.5, view.PositionSeconds);
+        Assert.Equal(200, view.DurationSeconds);
+        // Le même titre de l'hôte garde le même identifiant d'un état à l'autre (le lecteur ne le voit pas « changer »).
+        Assert.Equal(view.Current!.Id, SonNuage.UI.Services.JamSession.HostView(state, 70).Current!.Id);
+        Assert.Null(SonNuage.UI.Services.JamSession.HostView(state with { Track = null, SourceTrackId = null }, 0).Current);
+    }
+
+    [Fact]
     public void An_ad_or_episode_from_the_host_is_not_a_track_to_follow()
     {
         var json = """{"player_state":{"track":{"uri":"spotify:ad:123"},"position_as_of_timestamp":"5000","timestamp":"1","duration":"30000"}}""";

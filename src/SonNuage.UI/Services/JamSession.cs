@@ -1,4 +1,6 @@
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using SonNuage.Contracts;
 
@@ -6,8 +8,9 @@ namespace SonNuage.UI.Services;
 
 /// <summary>
 /// Côté appli : suit l'état d'un Jam (flux du serveur) et, en mode invité, garde le lecteur local en phase avec l'hôte
-/// — même titre (bibliothèque ou import YouTube), même position, mêmes pauses. En mode « hôte seulement », l'état est
-/// seulement affiché. Le serveur fait le gros du travail (voir <c>JamHub</c>) ; ici on écoute et on recale.
+/// — même titre (bibliothèque ou import YouTube), même position, mêmes pauses. En mode « hôte seulement », rien ne joue
+/// ici : le lecteur affiche ce que joue l'hôte (<see cref="Shown"/>). Dans les deux modes, les commandes de
+/// l'utilisateur vont à l'hôte. Le serveur fait le gros du travail (voir <c>JamHub</c>) ; ici on écoute et on recale.
 /// </summary>
 public sealed class JamSession : IDisposable, IPlayerRoute
 {
@@ -237,6 +240,7 @@ public sealed class JamSession : IDisposable, IPlayerRoute
 
     private void Apply(JamStateDto state)
     {
+        var wasHostOnly = State is { Active: true, Audio: JamAudio.RemoteOnly };
         if (state.AsOfUnixMs > 0)
         {
             var sample = NowMs - state.AsOfUnixMs;
@@ -250,7 +254,10 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             if (source is not null && source != _playingSource) _ = YoutubeLookup(state, source);
             if (_wake.CurrentCount == 0) try { _wake.Release(); } catch (SemaphoreFullException) { }
         }
+        // Le son sort chez l'hôte : ce qui jouait ici s'arrête (sinon on entendrait les deux).
+        if (state is { Active: true, Audio: JamAudio.RemoteOnly } && !wasHostOnly) _ = PauseLocalAsync();
         StateChanged?.Invoke();
+        ShownChanged?.Invoke();
     }
 
     /// <summary>
@@ -266,6 +273,12 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             try
             {
                 if (State is { Active: true, Audio: JamAudio.Guest } state) await SyncOnceAsync(state);
+                // Hôte seulement : la position affichée avance avec celle de l'hôte (à la cadence du lecteur local).
+                else if (State is { Active: true, Audio: JamAudio.RemoteOnly, IsPlaying: true } && NowMs - _shownTickMs >= ShownTick.TotalMilliseconds)
+                {
+                    _shownTickMs = NowMs;
+                    ShownChanged?.Invoke();
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
@@ -495,8 +508,54 @@ public sealed class JamSession : IDisposable, IPlayerRoute
 
     // ---- Piloter l'hôte : les commandes de l'utilisateur au lecteur vont au Jam (IPlayerRoute) ----
 
-    /// <summary>En mode invité : sur le lecteur local, la synchro annulerait aussitôt une pause ou un saut.</summary>
-    public bool Routes => State is { Active: true, Audio: JamAudio.Guest };
+    /// <summary>
+    /// Dans les deux modes : le Jam joue ce que joue l'hôte, seul l'appareil où sort le son change. En mode invité, la
+    /// synchro annulerait d'ailleurs aussitôt une pause ou un saut faits sur le lecteur local.
+    /// </summary>
+    public bool Routes => State is { Active: true };
+
+    /// <summary>Hôte seulement : ce que joue l'hôte, à afficher à la place du lecteur local (qui ne joue rien).</summary>
+    public PlayerState? Shown => State is { Active: true, Audio: JamAudio.RemoteOnly } state ? HostView(state, HostPosition(state)) : null;
+
+    public event Action? ShownChanged;
+
+    private static readonly TimeSpan ShownTick = TimeSpan.FromMilliseconds(500);
+    private long _shownTickMs;
+
+    /// <summary>
+    /// L'état du lecteur pour ce que joue l'hôte : son titre (celui de la bibliothèque s'il y est, sinon un titre
+    /// d'affichage), les suivants déjà trouvés, la pause et la position.
+    /// </summary>
+    public static PlayerState HostView(JamStateDto state, double positionSeconds)
+    {
+        var current = state.Resolved ?? (state.Track is { Title.Length: > 0 } t ? HostTrack(state.SourceTrackId ?? t.Title, t) : null);
+        if (current is null) return PlayerState.Empty;
+        var duration = state.Track is { DurationSeconds: > 0 } m ? m.DurationSeconds : current.DurationSeconds;
+        return PlayerState.Empty with
+        {
+            Queue = [current, .. state.Upcoming ?? []],
+            CurrentIndex = 0,
+            IsPlaying = state.IsPlaying,
+            PositionSeconds = positionSeconds,
+            DurationSeconds = duration,
+        };
+    }
+
+    private const string HostFormat = "spotify";
+
+    /// <summary>Titre d'affichage d'un titre de l'hôte absent de la bibliothèque (identifiant stable par titre).</summary>
+    private static TrackDto HostTrack(string source, JamTrackDto t) => new(
+        Id: new Guid(MD5.HashData(Encoding.UTF8.GetBytes("jam:" + source))), Title: t.Title, ArtistId: Guid.Empty,
+        ArtistName: t.Artist, AlbumId: Guid.Empty, AlbumTitle: t.Album ?? "", TrackNumber: null, DiscNumber: null,
+        DurationSeconds: t.DurationSeconds, Format: HostFormat, IsLossless: false, BitrateKbps: null, HasCover: false,
+        IsFavorite: false);
+
+    /// <summary>Arrête la lecture locale (commande de la synchro : elle ne doit pas partir chez l'hôte).</summary>
+    private async Task PauseLocalAsync()
+    {
+        PlayerRouting.Bypass();
+        if (_player.State.IsPlaying) await _player.TogglePlayAsync();
+    }
 
     Task IPlayerRoute.TogglePlayAsync() => ControlAsync(new JamControlRequest(State.IsPlaying ? JamControl.Pause : JamControl.Resume));
 
@@ -526,12 +585,13 @@ public sealed class JamSession : IDisposable, IPlayerRoute
     }
 
     /// <summary>
-    /// Titres de la bibliothèque seulement : un flux YouTube direct n'existe pas côté serveur. On s'arrête au premier
+    /// Titres de la bibliothèque seulement : un flux YouTube direct ou un titre d'affichage de l'hôte n'existent pas côté
+    /// serveur. On s'arrête au premier
     /// refus pour ne pas répéter le même message.
     /// </summary>
     private async Task QueueAsync(IReadOnlyList<TrackDto> tracks, bool playNow)
     {
-        foreach (var track in tracks.Where(t => !YoutubeTracks.IsYoutube(t)).Take(playNow ? 1 : MaxQueued))
+        foreach (var track in tracks.Where(t => !YoutubeTracks.IsYoutube(t) && t.Format != HostFormat).Take(playNow ? 1 : MaxQueued))
         {
             try
             {

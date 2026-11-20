@@ -129,6 +129,15 @@ public interface IPlayerRoute
     /// <summary>Lancer ce titre tout de suite.</summary>
     Task PlayAsync(TrackDto track);
     Task EnqueueAsync(IReadOnlyList<TrackDto> tracks);
+
+    /// <summary>
+    /// Quand le son sort ailleurs (Jam « hôte seulement ») : l'état à afficher à la place du lecteur local, qui ne joue
+    /// rien ; null quand le lecteur local joue lui-même.
+    /// </summary>
+    PlayerState? Shown { get; }
+
+    /// <summary><see cref="Shown"/> a changé (titre, pause, ou simplement la position qui avance).</summary>
+    event Action? ShownChanged;
 }
 
 /// <summary>Un lecteur dont les commandes peuvent être détournées (voir <see cref="IPlayerRoute"/>).</summary>

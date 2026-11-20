@@ -21,7 +21,7 @@ propre source. Aucun DRM n'est contourné.
 3. Un bandeau au-dessus du lecteur montre l'hôte et le titre suivi (point coloré : le son joue ici ; gris : il reste
    chez l'hôte). *Quitter le Jam* arrête le suivi et nous retire du Jam côté Spotify.
 4. Si l'hôte termine le Jam ou nous en retire, le bandeau disparaît et « Le Jam est terminé » s'affiche.
-5. En mode **Sur cet appareil aussi**, le lecteur de SonNuage pilote l'hôte : lecture/pause, saut dans le titre,
+5. Dans les deux modes, le lecteur de SonNuage pilote l'hôte (seul l'appareil où sort le son change) : lecture/pause, saut dans le titre,
    suivant, précédent, « Lire » ou « Ajouter à la file » sur un titre de la bibliothèque. Les boutons de la
    notification, de l'écran verrouillé, du casque et d'Android Auto aussi (Android).
 6. Un titre sans équivalent sûr s'annonce par une pop-up, dans les deux sens : titre de l'hôte introuvable ici
@@ -71,7 +71,9 @@ modale l'annonce tout de suite.
   Spotify par la recherche GraphQL du lecteur web (`api-partner.spotify.com/pathfinder/v2/query`, opération
   `searchTracks`) ; son hash change avec le lecteur web, il est relu dans son code public (cache 12 h), avec la valeur
   connue en secours. Côté appli, `LinkedPlayer` envoie les commandes de l'utilisateur à `JamSession` (`IPlayerRoute`)
-  tant que le Jam est suivi en mode invité ; la synchro garde la main sur le lecteur local (`PlayerRouting.Bypass`).
+  tant que le Jam est suivi, dans les deux modes ; la synchro garde la main sur le lecteur local
+  (`PlayerRouting.Bypass`). En mode « hôte seulement », la lecture locale s'arrête et le lecteur affiche ce que joue
+  l'hôte (`IPlayerRoute.Shown` : titre, suivants, pause, position extrapolée).
   Sur Android, `JamRoutingPlayer` fait de même pour les contrôleurs autres que l'interface.
 - **Lien court** (`spotify.link/…`) : suivi à la main, en https et vers des hôtes Spotify seulement (chaque
   redirection est revérifiée), pour que le serveur ne puisse pas être envoyé vers une autre adresse.
@@ -100,8 +102,6 @@ Deezer Connect ne relie que les appareils d'un même compte. Un lien Deezer coll
 
 ## À faire
 
-- En mode **Hôte seulement**, le lecteur de SonNuage reste local (il ne pilote pas l'hôte) : voulu, pour ne pas
-  confondre la lecture personnelle et le Jam.
 - Choisir un titre de la file dans Android Auto reste local (la synchro le rattrape).
 
 - **Reprise après redémarrage du serveur** (re-suivre automatiquement les Jams actifs).

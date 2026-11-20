@@ -177,6 +177,34 @@ public class LinkedPlayerTests
         public Task PreviousAsync() { Calls.Add("previous"); return Task.CompletedTask; }
         public Task PlayAsync(TrackDto track) { Calls.Add($"play {track.Title}"); return Task.CompletedTask; }
         public Task EnqueueAsync(IReadOnlyList<TrackDto> tracks) { Calls.Add($"enqueue {string.Join(",", tracks.Select(t => t.Title))}"); return Task.CompletedTask; }
+        public PlayerState? Shown { get; set; }
+        public event Action? ShownChanged;
+        public void Show(PlayerState? state) { Shown = state; ShownChanged?.Invoke(); }
+    }
+
+    [Fact]
+    public async Task When_the_sound_plays_on_the_host_the_player_shows_the_host()
+    {
+        // Jam « hôte seulement » : rien ne joue ici, mais le lecteur affiche et pilote ce que joue l'hôte.
+        var local = new FakePlayer();
+        var player = new LinkedPlayer(local, local, new Bus().Join("tab"));
+        await player.RestoreAsync();
+        await player.PlayAsync(Tracks, 0);
+        var route = new RecordingRoute();
+        player.Route = route;
+        var changes = 0;
+        player.StateChanged += () => changes++;
+
+        var host = PlayerState.Empty with { Queue = [Tracks[2]], CurrentIndex = 0, IsPlaying = true, PositionSeconds = 12 };
+        route.Show(host);
+
+        Assert.Equal(host, player.State);
+        Assert.True(changes > 0);
+        await player.TogglePlayAsync();
+        Assert.Equal(["toggle"], route.Calls);
+
+        route.Show(null);
+        Assert.Equal(local.State, player.State);
     }
 
     [Fact]

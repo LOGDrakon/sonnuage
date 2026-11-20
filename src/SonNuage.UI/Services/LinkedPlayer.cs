@@ -10,7 +10,20 @@ namespace SonNuage.UI.Services;
 public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer, IRoutablePlayer
 {
     /// <summary>Dans un Jam, les commandes de l'utilisateur vont à l'hôte (voir <see cref="IPlayerRoute"/>).</summary>
-    public IPlayerRoute? Route { get; set; }
+    public IPlayerRoute? Route
+    {
+        get => _route;
+        set
+        {
+            if (_route is not null) _route.ShownChanged -= OnShownChanged;
+            _route = value;
+            if (_route is not null) _route.ShownChanged += OnShownChanged;
+        }
+    }
+
+    private IPlayerRoute? _route;
+
+    private void OnShownChanged() => StateChanged?.Invoke();
 
     /// <summary>Le temps pour un lecteur actif de répondre à un nouvel arrivant.</summary>
     private static readonly TimeSpan HelloWait = TimeSpan.FromMilliseconds(300);
@@ -53,7 +66,11 @@ public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer, I
 
     public string? RemoteName => IsRemote ? _activeName : null;
 
-    public PlayerState State => IsRemote ? _remote : _local.State;
+    /// <summary>
+    /// Ce que joue l'hôte d'un Jam quand le son sort chez lui, sinon l'appareil qui joue (celui-ci ou un autre du
+    /// compte). La synchro du Jam (<see cref="PlayerRouting.Bypass"/>) voit toujours le vrai lecteur.
+    /// </summary>
+    public PlayerState State => PlayerRouting.For(Route)?.Shown ?? (IsRemote ? _remote : _local.State);
 
     // Le fondu est un réglage du compte, appliqué par l'onglet qui joue : on l'affiche dès que ce lecteur sait le faire.
     public bool SupportsCrossfade => _local.SupportsCrossfade;
