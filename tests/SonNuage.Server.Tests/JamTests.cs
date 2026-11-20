@@ -193,6 +193,38 @@ public sealed class JamTests
     }
 
     [Fact]
+    public void An_import_prefers_the_artists_own_upload_to_a_fan_upload()
+    {
+        // Cas réel (« Cardiac Arrest », Alfie Castley) : une traduction de fan était importée à la place du titre.
+        var song = new JamTrackDto("Cardiac Arrest", "Alfie Castley", null, 147, "NL8RL2319905");
+        var query = new MatchQuery(song.Artist, song.Title, song.DurationSeconds);
+        var ranked = YoutubeMatcher.Rank(query, [
+            new YtEntry("y8PIRe9dowM", "Cardiac Arrest", null, null, null),
+            new YtEntry("fanupload01", "[和訳] Cardiac Arrest - Alfie Castley", "Cro_", 147, null),
+            new YtEntry("indolirik01", "Alfie Castley - Cardiac Arrest | Lirik Terjemahan", "Indolirik", 147, null),
+            new YtEntry("y8PIRe9dowM", "Cardiac Arrest", "Alfie Castley", 147, null),
+        ]);
+        Assert.Equal("y8PIRe9dowM", JamResolver.PickImport(ranked, song)?.Entry.Id);
+    }
+
+    [Theory]
+    [InlineData("Cardiac Arrest", "Alfie Castley", "[和訳] Cardiac Arrest - Alfie Castley", "Cro_")]
+    [InlineData("Stereo Hearts (feat. Adam Levine)", "Gym Class Heroes, Adam Levine", "Gym Class Heroes - Stereo Hearts (Lyrics)", "Kids Dance Party")]
+    [InlineData("Bohemian Rhapsody - Remastered 2011", "Queen", "Queen – Bohemian Rhapsody (Official Video Remastered)", "Queen Official")]
+    public void An_import_is_named_after_the_hosts_track_not_the_video(string title, string artist, string videoTitle, string channel)
+    {
+        // Le titre d'une vidéo est souvent à l'envers (« Titre - Artiste ») ou habillé : le Jam connaît le vrai.
+        var song = new JamTrackDto(title, artist, null, 200, null);
+        var video = JamResolver.ImportVideo(new YtEntry("abcdefghijk", videoTitle, channel, 200, null), song);
+
+        var parsed = TitleParser.Parse(video.Title, video.Channel);
+        Assert.Equal(artist, parsed.Artist);
+        Assert.StartsWith(title.Split(" - ")[0].Split(" (")[0], parsed.Title);
+        Assert.Equal("abcdefghijk", video.VideoId);
+        Assert.Equal(channel, video.Channel);
+    }
+
+    [Fact]
     public void An_ad_or_episode_from_the_host_is_not_a_track_to_follow()
     {
         var json = """{"player_state":{"track":{"uri":"spotify:ad:123"},"position_as_of_timestamp":"5000","timestamp":"1","duration":"30000"}}""";

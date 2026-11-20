@@ -62,10 +62,8 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
             var best = PickImport(ranked, track);
             Trace(track, "import YouTube", ranked.Count, best is { } p ? $"« {p.Entry.Title} » — {p.Entry.Channel}" : null, null);
             if (best is null) return null;
-            var e = best.Entry;
-            var video = new YoutubeVideoDto(e.Id, e.Title, e.Channel, e.DurationSeconds, e.Thumbnail, null, e.Album);
-            await importer.EnqueueAsync(db, [video], albumHint: null, subscriptionId: null, ct);
-            return e.Id;
+            await importer.EnqueueAsync(db, [ImportVideo(best.Entry, track)], albumHint: null, subscriptionId: null, ct);
+            return best.Entry.Id;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -81,6 +79,14 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
     public static RankedEntry? PickImport(IReadOnlyList<RankedEntry> ranked, JamTrackDto track) =>
         JamMatch.Best(track, ranked.OrderByDescending(r => r.Score),
             r => new JamCandidate(r.Entry.Title, r.Entry.Channel ?? "", r.Entry.DurationSeconds ?? 0, null, JamSourceKind.Video))?.Item;
+
+    /// <summary>
+    /// La vidéo à importer, nommée d'après le titre de l'hôte (Spotify) : le titre d'une vidéo est souvent à l'envers
+    /// (« Titre - Artiste ») ou habillé, et l'import l'aurait mal découpé. « Artiste - Titre » est la forme que
+    /// <see cref="TitleParser"/> lit sans ambiguïté ; la chaîne reste la vraie.
+    /// </summary>
+    public static YoutubeVideoDto ImportVideo(YtEntry e, JamTrackDto track) =>
+        new(e.Id, $"{track.Artist} - {track.Title}", e.Channel, e.DurationSeconds, e.Thumbnail, null, e.Album);
 
     /// <summary>Une ligne par décision : quel titre, où, combien de candidats, lequel et pourquoi.</summary>
     private void Trace(JamTrackDto track, string where, int count, string? chosen, JamVerdict? verdict) =>
