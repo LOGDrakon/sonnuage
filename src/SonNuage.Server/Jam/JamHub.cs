@@ -44,7 +44,8 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
     private async Task<bool> JoinLockedAsync(Guid userId, string joinToken, JamAudio audio, CancellationToken ct)
     {
         await StopAsync(userId);
-        var follower = new JamFollower(userId, joinToken, audio, scopes, Publish, Ended, _log);
+        JamFollower? follower = null;
+        follower = new JamFollower(userId, joinToken, audio, scopes, (user, state) => PublishFrom(follower, user, state), Ended, _log);
         _followers[userId] = follower;
         bool joined;
         try
@@ -121,6 +122,15 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
             if (_subscribers.TryGetValue(userId, out var d)) d.TryRemove(id, out _);
             channel.Writer.TryComplete();
         }));
+    }
+
+    /// <summary>
+    /// État publié par un suivi : seulement s'il est toujours celui du compte. Ses préparations en cours peuvent finir
+    /// après son arrêt (ou son remplacement par un nouveau « join ») et ne doivent pas ranimer un Jam terminé.
+    /// </summary>
+    private void PublishFrom(JamFollower? follower, Guid userId, JamStateDto state)
+    {
+        if (follower is not null && _followers.TryGetValue(userId, out var current) && ReferenceEquals(current, follower)) Publish(userId, state);
     }
 
     private void Publish(Guid userId, JamStateDto state)
