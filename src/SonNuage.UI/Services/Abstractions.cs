@@ -123,6 +123,11 @@ public interface IPlayerRoute
 {
     bool Routes { get; }
     Task TogglePlayAsync();
+    /// <summary>
+    /// Lecture ou pause, quel que soit l'état : pour une commande qui dit ce qu'elle veut (touche « pause » du casque,
+    /// notification) et que le lecteur local, muet ou en retard sur l'hôte, ne peut pas traduire en bascule.
+    /// </summary>
+    Task SetPlayingAsync(bool playing);
     Task SeekAsync(double seconds);
     Task NextAsync();
     Task PreviousAsync();

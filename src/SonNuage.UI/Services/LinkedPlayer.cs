@@ -130,8 +130,16 @@ public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer, I
     // ---- IPlayer : ici, ou transmis au lecteur actif ----
 
     public Task PlayAsync(IReadOnlyList<TrackDto> tracks, int startIndex = 0, bool? shuffle = null) =>
-        PlayerRouting.For(Route) is { } route ? (startIndex >= 0 && startIndex < tracks.Count ? route.PlayAsync(tracks[startIndex]) : Task.CompletedTask) :
+        PlayerRouting.For(Route) is { } route ? PlayOnHostAsync(route, tracks, startIndex) :
         IsRemote ? SendAsync(new PlayerCommand("play", Tracks: tracks, Index: startIndex, Shuffle: shuffle)) : _local.PlayAsync(tracks, startIndex, shuffle);
+
+    /// <summary>Chez l'hôte, un seul titre part (« lire maintenant ») ; lecture aléatoire (index négatif) : l'un d'eux au hasard.</summary>
+    private static Task PlayOnHostAsync(IPlayerRoute route, IReadOnlyList<TrackDto> tracks, int startIndex)
+    {
+        if (tracks.Count == 0) return Task.CompletedTask;
+        var index = startIndex < 0 ? Random.Shared.Next(tracks.Count) : startIndex;
+        return index < tracks.Count ? route.PlayAsync(tracks[index]) : Task.CompletedTask;
+    }
 
     /// <summary>Sur un autre appareil, la radio part comme une simple liste : seul ce lecteur-ci sait demander la suite.</summary>
     public Task PlayStationAsync(string stationId, IReadOnlyList<TrackDto> tracks) =>
@@ -166,11 +174,30 @@ public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer, I
 
     public Task SetSpeedAsync(double speed) => IsRemote ? Task.CompletedTask : _local.SetSpeedAsync(speed);
 
-    public Task JumpToAsync(int queueIndex) => IsRemote ? SendAsync(new PlayerCommand("jump", Index: queueIndex)) : _local.JumpToAsync(queueIndex);
+    public Task JumpToAsync(int queueIndex) =>
+        PlayerRouting.For(Route) is { } route ? JumpOnHostAsync(route, queueIndex) :
+        IsRemote ? SendAsync(new PlayerCommand("jump", Index: queueIndex)) : _local.JumpToAsync(queueIndex);
 
-    public Task SetShuffleAsync(bool shuffle) => IsRemote ? SendAsync(new PlayerCommand("shuffle", Flag: shuffle)) : _local.SetShuffleAsync(shuffle);
+    /// <summary>
+    /// Un titre de la file affichée (celle de l'hôte, ou ce que la synchro a chargé pour lui) : le suivant passe par
+    /// « suivant », un autre est lancé chez l'hôte, celui en cours ne change rien.
+    /// </summary>
+    private Task JumpOnHostAsync(IPlayerRoute route, int queueIndex)
+    {
+        var state = State;
+        if (queueIndex < 0 || queueIndex >= state.Queue.Count || queueIndex == state.CurrentIndex) return Task.CompletedTask;
+        return queueIndex == state.CurrentIndex + 1 ? route.NextAsync() : route.PlayAsync(state.Queue[queueIndex]);
+    }
 
-    public Task SetRepeatAsync(RepeatMode mode) => IsRemote ? SendAsync(new PlayerCommand("repeat", Repeat: mode)) : _local.SetRepeatAsync(mode);
+    // Dans un Jam, la file, l'aléatoire et la répétition sont ceux de l'hôte, que SonNuage ne sait pas modifier : sans
+    // effet (sur la file locale, ils changeraient une file cachée ou seraient annulés par la synchro).
+    public Task SetShuffleAsync(bool shuffle) =>
+        PlayerRouting.For(Route) is not null ? Task.CompletedTask :
+        IsRemote ? SendAsync(new PlayerCommand("shuffle", Flag: shuffle)) : _local.SetShuffleAsync(shuffle);
+
+    public Task SetRepeatAsync(RepeatMode mode) =>
+        PlayerRouting.For(Route) is not null ? Task.CompletedTask :
+        IsRemote ? SendAsync(new PlayerCommand("repeat", Repeat: mode)) : _local.SetRepeatAsync(mode);
 
     public Task SetVolumeAsync(double volume)
     {
@@ -184,7 +211,7 @@ public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer, I
         PlayerRouting.For(Route) is { } route ? route.EnqueueAsync(tracks) :
         IsRemote ? SendAsync(new PlayerCommand("enqueue", Tracks: tracks, Flag: playNext)) : _local.EnqueueAsync(tracks, playNext);
 
-    public Task RemoveAtAsync(int queueIndex) => IsRemote ? SendAsync(new PlayerCommand("remove", Index: queueIndex)) : _local.RemoveAtAsync(queueIndex);
+    public Task RemoveAtAsync(int queueIndex) => PlayerRouting.For(Route) is not null ? Task.CompletedTask : IsRemote ? SendAsync(new PlayerCommand("remove", Index: queueIndex)) : _local.RemoveAtAsync(queueIndex);
 
     public Task ReloadSettingsAsync() => _local.ReloadSettingsAsync();
 

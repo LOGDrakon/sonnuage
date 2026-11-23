@@ -172,6 +172,7 @@ public class LinkedPlayerTests
         public bool Routes { get; set; } = true;
         public List<string> Calls { get; } = [];
         public Task TogglePlayAsync() { Calls.Add("toggle"); return Task.CompletedTask; }
+        public Task SetPlayingAsync(bool playing) { Calls.Add(playing ? "resume" : "pause"); return Task.CompletedTask; }
         public Task SeekAsync(double seconds) { Calls.Add($"seek {seconds}"); return Task.CompletedTask; }
         public Task NextAsync() { Calls.Add("next"); return Task.CompletedTask; }
         public Task PreviousAsync() { Calls.Add("previous"); return Task.CompletedTask; }
@@ -229,6 +230,46 @@ public class LinkedPlayerTests
 
         Assert.Equal(["toggle", "seek 42", "next", "previous", "play B", "enqueue C"], route.Calls);
         Assert.Equal(before, local.State);
+    }
+
+    [Fact]
+    public async Task During_a_jam_the_queue_page_acts_on_the_hosts_queue()
+    {
+        // La file affichée est celle de l'hôte : y toucher un titre le fait jouer chez l'hôte (le suivant : « suivant »),
+        // et retirer, mélanger ou répéter ne touchent pas la file locale cachée.
+        var local = new FakePlayer();
+        var player = new LinkedPlayer(local, local, new Bus().Join("tab"));
+        await player.RestoreAsync();
+        await player.PlayAsync(Tracks, 0);
+        var route = new RecordingRoute();
+        player.Route = route;
+        route.Show(PlayerState.Empty with { Queue = [Tracks[2], Tracks[1], Tracks[0]], CurrentIndex = 0, IsPlaying = true });
+        var before = local.State;
+
+        await player.JumpToAsync(0);
+        await player.JumpToAsync(1);
+        await player.JumpToAsync(2);
+        await player.RemoveAtAsync(1);
+        await player.SetShuffleAsync(true);
+        await player.SetRepeatAsync(RepeatMode.One);
+
+        Assert.Equal(["next", "play A"], route.Calls);
+        Assert.Equal(before, local.State);
+    }
+
+    [Fact]
+    public async Task During_a_jam_shuffle_play_starts_one_of_the_tracks_on_the_host()
+    {
+        var local = new FakePlayer();
+        var player = new LinkedPlayer(local, local, new Bus().Join("tab"));
+        await player.RestoreAsync();
+        var route = new RecordingRoute();
+        player.Route = route;
+
+        await player.PlayAsync(Tracks, -1, shuffle: true);
+
+        var call = Assert.Single(route.Calls);
+        Assert.Contains(call, Tracks.Select(t => $"play {t.Title}"));
     }
 
     [Fact]
