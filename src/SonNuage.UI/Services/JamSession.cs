@@ -123,6 +123,23 @@ public sealed class JamSession : IDisposable, IPlayerRoute
 
     public Task<MusicServiceAccountDto?> SpotifyAccountAsync() => _api.SpotifyAccountAsync();
 
+    /// <summary>La liaison Spotify a changé (reliée ou déliée), depuis n'importe quel écran : les autres se mettent à jour.</summary>
+    public event Action<MusicServiceAccountDto>? SpotifyChanged;
+
+    /// <summary>Confie au serveur les jetons obtenus sur l'appareil.</summary>
+    public async Task<MusicServiceAccountDto?> SaveSpotifyTokenAsync(MusicServiceTokenRequest tokens)
+    {
+        var account = await _api.SaveSpotifyTokenAsync(tokens);
+        if (account is not null) SpotifyChanged?.Invoke(account);
+        return account;
+    }
+
+    public async Task DisconnectSpotifyAsync()
+    {
+        await _api.DisconnectSpotifyAsync();
+        SpotifyChanged?.Invoke(new MusicServiceAccountDto(Jam.Spotify, false, null));
+    }
+
     /// <summary>Rejoint un Jam depuis un lien (ou code). Démarre le suivi en direct.</summary>
     public async Task JoinAsync(string link, JamAudio audio)
     {

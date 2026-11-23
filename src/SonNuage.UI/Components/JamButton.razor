@@ -1,7 +1,6 @@
 @* Entrée « Rejoindre un Jam » (comme le bouton Jam de Spotify) : choix du service, lien collé ou scanné, mode d'écoute. *@
 @implements IDisposable
 @inject JamSession Jam
-@inject ApiClient Api
 @inject IMusicServiceAuth Auth
 @inject IJamScanner Scanner
 @inject UiState Ui
@@ -21,7 +20,12 @@
 
 <Modal Open="_open" OpenChanged="v => _open = v" Title="@L["jam.join"]">
     <ChildContent>
-        @if (_account is null)
+        @if (_account is null && _accountError is { } error)
+        {
+            <p class="form-error block">@error</p>
+            <button class="btn" disabled="@_busy" @onclick="LoadAccountAsync">@L["common.retry"]</button>
+        }
+        else if (_account is null)
         {
             <p class="muted">@L["common.loading"]</p>
         }
@@ -85,21 +89,57 @@
     private string _link = "";
     private JamAudio _audio = JamAudio.Guest;
     private MusicServiceAccountDto? _account;
+    /// <summary>L'état de la liaison n'a pas pu être lu : affiché à la place de « Chargement… », avec « Réessayer ».</summary>
+    private string? _accountError;
 
-    protected override void OnInitialized() => Jam.StateChanged += OnChanged;
+    protected override void OnInitialized()
+    {
+        Jam.StateChanged += OnChanged;
+        Jam.SpotifyChanged += OnSpotifyChanged;
+    }
 
     private async Task OpenAsync()
     {
         _open = true;
-        _account = null;
-        await Run(async () => _account = await Jam.SpotifyAccountAsync());
+        await LoadAccountAsync();
     }
+
+    private async Task LoadAccountAsync()
+    {
+        _account = null;
+        _accountError = null;
+        _busy = true;
+        try
+        {
+            _account = await Jam.SpotifyAccountAsync();
+            if (_account is null) _accountError = L["errors.generic"];
+        }
+        catch (ApiException ex)
+        {
+            _accountError = L.Server(ex.Message);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
+        {
+            _accountError = L["jam.unreachable"];
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private void OnSpotifyChanged(MusicServiceAccountDto account) => InvokeAsync(() =>
+    {
+        // Relié ou délié ailleurs (Réglages, une autre instance de ce bouton) : la modale ouverte suit.
+        if (_account is not null) _account = account;
+        StateHasChanged();
+    });
 
     private Task ConnectAsync() => Run(async () =>
     {
         var tokens = await Auth.ConnectAsync(SonNuage.Contracts.Jam.Spotify, CancellationToken.None);
         if (tokens is null) return;
-        _account = await Api.SaveSpotifyTokenAsync(tokens);
+        _account = await Jam.SaveSpotifyTokenAsync(tokens);
         Ui.Notify(_account?.DisplayName is { Length: > 0 } name ? L["jam.saved", ("name", name)] : L["jam.connectedUnknown"]);
     });
 
@@ -140,5 +180,9 @@
 
     private void OnChanged() => InvokeAsync(StateHasChanged);
 
-    public void Dispose() => Jam.StateChanged -= OnChanged;
+    public void Dispose()
+    {
+        Jam.StateChanged -= OnChanged;
+        Jam.SpotifyChanged -= OnSpotifyChanged;
+    }
 }

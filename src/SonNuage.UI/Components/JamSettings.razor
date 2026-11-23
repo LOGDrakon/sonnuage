@@ -1,5 +1,5 @@
 @* Rejoindre un Jam (facultatif, par compte) : liaison du service d'écoute. Les jetons restent côté serveur. *@
-@inject ApiClient Api
+@implements IDisposable
 @inject JamSession Jam
 @inject IMusicServiceAuth Auth
 @inject UiState Ui
@@ -37,20 +37,32 @@
     private MusicServiceAccountDto? _account;
     private bool _busy;
 
-    protected override Task OnInitializedAsync() => Run(async () => _account = await Jam.SpotifyAccountAsync());
+    protected override Task OnInitializedAsync()
+    {
+        // Relié (ou délié) depuis une autre entrée, la modale « Rejoindre un Jam » par exemple : on suit.
+        Jam.SpotifyChanged += OnSpotifyChanged;
+        return Run(async () => _account = await Jam.SpotifyAccountAsync());
+    }
+
+    private void OnSpotifyChanged(MusicServiceAccountDto account) => InvokeAsync(() =>
+    {
+        _account = account;
+        StateHasChanged();
+    });
+
+    public void Dispose() => Jam.SpotifyChanged -= OnSpotifyChanged;
 
     private Task ConnectAsync() => Run(async () =>
     {
         var tokens = await Auth.ConnectAsync(SonNuage.Contracts.Jam.Spotify, CancellationToken.None);
         if (tokens is null) return; // Annulé.
-        _account = await Api.SaveSpotifyTokenAsync(tokens);
+        _account = await Jam.SaveSpotifyTokenAsync(tokens);
         Ui.Notify(_account?.DisplayName is { Length: > 0 } name ? L["jam.saved", ("name", name)] : L["jam.connectedUnknown"]);
     });
 
     private Task DisconnectAsync() => Run(async () =>
     {
-        await Api.DisconnectSpotifyAsync();
-        _account = new MusicServiceAccountDto(SonNuage.Contracts.Jam.Spotify, false, null);
+        await Jam.DisconnectSpotifyAsync();
         Ui.Notify(L["jam.disconnected"]);
     });
 
