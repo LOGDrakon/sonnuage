@@ -75,6 +75,10 @@ modale l'annonce tout de suite.
   (`PlayerRouting.Bypass`). En mode « hôte seulement », la lecture locale s'arrête et le lecteur affiche ce que joue
   l'hôte (`IPlayerRoute.Shown` : titre, suivants, pause, position extrapolée).
   Sur Android, `JamRoutingPlayer` fait de même pour les contrôleurs autres que l'interface.
+  Dans la file affichée, toucher le titre suivant envoie « suivant », un autre est lancé chez l'hôte ; retirer,
+  mélanger et répéter sont sans effet (la file est celle de l'hôte). Lecture et pause venues du casque ou de la
+  notification partent comme telles (`SetPlayingAsync`). Avec plusieurs appareils du compte, seul celui qui joue
+  synchronise.
 - **Lien court** (`spotify.link/…`) : suivi à la main, en https et vers des hôtes Spotify seulement (chaque
   redirection est revérifiée), pour que le serveur ne puisse pas être envoyé vers une autre adresse.
 
