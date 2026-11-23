@@ -191,6 +191,12 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         _playingSource = null;
         _playing = null;
         _missingSource = null;
+        // Une recherche ratée lors d'un Jam précédent ne doit pas condamner le même titre dans celui-ci.
+        lock (_lookupGate)
+        {
+            _lookupSource = null;
+            _lookup = null;
+        }
         _ = _youtube.WarmUpAsync();
         _ = FollowAsync(cts.Token);
         _ = SyncLoopAsync(cts.Token);
@@ -290,7 +296,7 @@ public sealed class JamSession : IDisposable, IPlayerRoute
                 // corrections à ce lecteur, en plus des siennes, et la lecture basculerait sans fin.
                 // Les commandes de la synchro vont au lecteur local ; seules celles de l'utilisateur vont à l'hôte.
                 if (State is { Active: true, Audio: JamAudio.Guest } state && _player is not IConnectPlayer { IsRemote: true })
-                    await PlayerRouting.BypassAsync(() => SyncOnceAsync(state));
+                    await PlayerRouting.BypassAsync(() => SyncOnceAsync(state, ct));
                 // Hôte seulement : la position affichée avance avec celle de l'hôte (à la cadence du lecteur local).
                 else if (State is { Active: true, Audio: JamAudio.RemoteOnly, IsPlaying: true } && NowMs - _shownTickMs >= ShownTick.TotalMilliseconds)
                 {
@@ -328,10 +334,12 @@ public sealed class JamSession : IDisposable, IPlayerRoute
     private static readonly TimeSpan ToggleSettle = TimeSpan.FromMilliseconds(1500);
     private long _lastToggleAtMs;
 
-    private async Task SyncOnceAsync(JamStateDto state)
+    /// <summary>Identité du titre de l'hôte (Spotify) : c'est elle qui décide d'un changement, pas ce qu'on joue pour lui.</summary>
+    private static string? SourceOf(JamStateDto state) => state.SourceTrackId ?? state.Resolved?.Id.ToString() ?? state.Track?.Title;
+
+    private async Task SyncOnceAsync(JamStateDto state, CancellationToken ct)
     {
-        // Identité du titre de l'hôte (Spotify) : c'est elle qui décide d'un changement, pas ce qu'on joue pour lui.
-        var source = state.SourceTrackId ?? state.Resolved?.Id.ToString() ?? state.Track?.Title;
+        var source = SourceOf(state);
         if (source is null)
         {
             // L'hôte ne joue pas de titre (pub, épisode, rien) : on ne laisse pas tourner le précédent à contretemps.
@@ -341,14 +349,16 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         }
         if (_playingSource != source)
         {
-            if (await PickTrackAsync(state, source) is not { } pick)
+            if (await PickTrackAsync(state, source, ct) is not { } pick)
             {
                 // Rien de jouable pour l'instant. Introuvable pour de bon : le titre précédent ne continue pas à contretemps.
                 if (_missingSource == source && _playing is { } previous && _player.State.Current?.Id == previous.Id && _player.State.IsPlaying)
                     await TogglePlayAsync();
                 return;
             }
-            await StartAsync(state, source, pick);
+            // La recherche a pu durer : on part de l'état le plus récent (position, pause), s'il s'agit toujours du même titre.
+            if (State is not { Active: true, Audio: JamAudio.Guest } fresh || SourceOf(fresh) != source) return;
+            await StartAsync(fresh, source, pick);
             return;
         }
         if (_playing is not { } track) return;
@@ -432,11 +442,19 @@ public sealed class JamSession : IDisposable, IPlayerRoute
     /// Ce qu'on joue pour le titre de l'hôte : le titre de la bibliothèque s'il est prêt, sinon directement le flux
     /// YouTube (≈ 0,5 s) pendant que le serveur l'importe. Une fois lancé, on ne bascule plus en cours de titre.
     /// </summary>
-    private async Task<TrackDto?> PickTrackAsync(JamStateDto state, string source)
+    private async Task<TrackDto?> PickTrackAsync(JamStateDto state, string source, CancellationToken ct)
     {
         if (state is { Resolve: JamResolve.Matched, Resolved: { } library }) return library;
         if (YoutubeLookup(state, source) is not { } lookup) return null;
+        // La recherche peut prendre des dizaines de secondes (réseau lent, délais) : un nouvel état (l'hôte change de
+        // titre, ou le serveur l'a trouvé dans la bibliothèque) interrompt l'attente, la boucle repart de lui.
+        if (!lookup.IsCompleted && !await LookupOrWakeAsync(lookup, ct)) return null;
         var audio = await lookup;
+        // L'hôte a changé de titre pendant la recherche : ce résultat ne sert plus.
+        state = State;
+        if (SourceOf(state) != source || state.Track is null) return null;
+        // Trouvé entre-temps dans la bibliothèque (ou importé) : mieux qu'un flux YouTube.
+        if (state is { Resolve: JamResolve.Matched, Resolved: { } found }) return found;
         if (audio is null)
         {
             // Le serveur n'a rien trouvé non plus (bibliothèque, import) : on le dit, une fois.
@@ -452,20 +470,62 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         return YoutubeTracks.Create(audio.VideoId, meta.Title, meta.Artist, meta.DurationSeconds > 0 ? meta.DurationSeconds : audio.DurationSeconds);
     }
 
-    /// <summary>Recherche YouTube du titre de l'hôte, lancée une fois par titre (dès la réception de l'état).</summary>
+    /// <summary>Vrai si la recherche a fini la première ; faux si un nouvel état est arrivé avant.</summary>
+    private async Task<bool> LookupOrWakeAsync(Task<YoutubeAudio?> lookup, CancellationToken ct)
+    {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var wake = _wake.WaitAsync(stop.Token);
+        var first = await Task.WhenAny(lookup, wake);
+        // L'attente du réveil ne doit pas survivre à la course : elle volerait le prochain signal à la boucle.
+        stop.Cancel();
+        try
+        {
+            await wake;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        ct.ThrowIfCancellationRequested();
+        return first == lookup;
+    }
+
+    /// <summary>Un échec de la recherche YouTube (rien de sûr, ou YouTube injoignable) est retenté après ce délai.</summary>
+    private static readonly TimeSpan LookupRetry = TimeSpan.FromSeconds(20);
+    private long _lookupFailedAtMs;
+
+    /// <summary>
+    /// Recherche YouTube du titre de l'hôte, lancée une fois par titre (dès la réception de l'état). Un résultat vide
+    /// n'est gardé que <see cref="LookupRetry"/> : un réseau passager ne condamne pas le titre entier.
+    /// </summary>
     private Task<YoutubeAudio?>? YoutubeLookup(JamStateDto state, string source)
     {
         if (state is not { Audio: JamAudio.Guest, Track: { Title.Length: > 0 } meta }) return null;
         if (state.Resolve == JamResolve.Matched) return null;
         lock (_lookupGate)
         {
-            if (_lookupSource != source)
+            var retry = _lookup is { IsCompleted: true } done && (!done.IsCompletedSuccessfully || done.Result is null)
+                && NowMs - _lookupFailedAtMs >= LookupRetry.TotalMilliseconds;
+            if (_lookupSource != source || _lookup is null || retry)
             {
                 _lookupSource = source;
-                _lookup = _youtube.FindAsync(meta);
+                _lookup = FindAsync(meta);
             }
             return _lookup;
         }
+    }
+
+    private async Task<YoutubeAudio?> FindAsync(JamTrackDto meta)
+    {
+        YoutubeAudio? audio = null;
+        try
+        {
+            audio = await _youtube.FindAsync(meta);
+        }
+        finally
+        {
+            if (audio is null) _lookupFailedAtMs = NowMs;
+        }
+        return audio;
     }
 
     private async Task StartAsync(JamStateDto state, string source, TrackDto track)

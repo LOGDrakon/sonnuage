@@ -110,6 +110,23 @@ public sealed class JamSessionTests
         Assert.Equal(0, local.State.PositionSeconds);
     }
 
+    [Fact]
+    public async Task A_slow_youtube_lookup_does_not_hold_back_the_next_track()
+    {
+        // YouTube met longtemps à répondre pour le titre en cours ; l'hôte passe à un titre de la bibliothèque : on le
+        // suit tout de suite, sans attendre la fin de la recherche devenue inutile.
+        var next = Library("Next");
+        var local = new FakePlayer();
+        var server = new FakeJamServer(Playing(JamAudio.Guest));
+        using var jam = await SessionAsync(server, local, new Offline(TimeSpan.FromSeconds(4)));
+        await jam.JoinAsync("https://spotify.link/x", JamAudio.Guest);
+        await Task.Delay(300);
+
+        server.Push(Playing(JamAudio.Guest, next) with { SourceTrackId = "spotify-2" });
+
+        await Until(() => local.State.Current?.Id == next.Id, TimeSpan.FromSeconds(2));
+    }
+
     // ---- Faux serveur ----
 
     private static JamStateDto Playing(JamAudio audio, TrackDto? resolved = null, double position = 30) => new(
@@ -120,9 +137,9 @@ public sealed class JamSessionTests
     private static TrackDto Library(string title, double seconds = 200) => new(
         Guid.NewGuid(), title, Guid.NewGuid(), "Artiste", Guid.NewGuid(), "Album", 1, 1, seconds, "mp3", false, 320, false, false);
 
-    private static async Task Until(Func<bool> condition)
+    private static async Task Until(Func<bool> condition, TimeSpan? patience = null)
     {
-        var until = DateTime.UtcNow + Patience;
+        var until = DateTime.UtcNow + (patience ?? Patience);
         while (!condition())
         {
             if (DateTime.UtcNow > until) throw new TimeoutException("condition jamais remplie");
@@ -130,7 +147,7 @@ public sealed class JamSessionTests
         }
     }
 
-    private static async Task<JamSession> SessionAsync(FakeJamServer server, IPlayer player)
+    private static async Task<JamSession> SessionAsync(FakeJamServer server, IPlayer player, HttpMessageHandler? youtube = null)
     {
         var store = new MemoryStore();
         var accounts = new AccountStore(store, multiAccount: true);
@@ -144,14 +161,17 @@ public sealed class JamSessionTests
         var endpoint = new FixedEndpoint(Server);
         var auth = new AuthSession(store, endpoint, accounts, factory);
         await auth.EnsureLoadedAsync();
-        return new JamSession(new ApiClient(factory, endpoint, auth), player, auth, new YoutubeDirect(new Offline()));
+        return new JamSession(new ApiClient(factory, endpoint, auth), player, auth, new YoutubeDirect(youtube ?? new Offline()));
     }
 
-    /// <summary>YouTube injoignable : la recherche directe rend null aussitôt.</summary>
-    private sealed class Offline : HttpMessageHandler
+    /// <summary>YouTube injoignable : la recherche directe rend null, aussitôt ou après <paramref name="delay"/>.</summary>
+    private sealed class Offline(TimeSpan delay = default) : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            await Task.Delay(delay, ct);
             throw new HttpRequestException("hors ligne");
+        }
     }
 
     /// <summary>Un seul appareil sur le compte : le relais ne renvoie rien.</summary>
