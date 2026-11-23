@@ -548,10 +548,17 @@ public sealed class JamSession : IDisposable, IPlayerRoute
 
     /// <summary>Titre d'affichage d'un titre de l'hôte absent de la bibliothèque (identifiant stable par titre).</summary>
     private static TrackDto HostTrack(string source, JamTrackDto t) => new(
-        Id: new Guid(MD5.HashData(Encoding.UTF8.GetBytes("jam:" + source))), Title: t.Title, ArtistId: Guid.Empty,
+        Id: HostTrackId(source), Title: t.Title, ArtistId: Guid.Empty,
         ArtistName: t.Artist, AlbumId: Guid.Empty, AlbumTitle: t.Album ?? "", TrackNumber: null, DiscNumber: null,
         DurationSeconds: t.DurationSeconds, Format: HostFormat, IsLossless: false, BitrateKbps: null, HasCover: false,
         IsFavorite: false);
+
+    /// <summary>
+    /// SHA-256 tronqué à 16 octets, comme <see cref="YoutubeTracks.IdFor"/> : MD5 n'existe pas dans le navigateur
+    /// (WebAssembly), où il lèverait une exception à chaque lecture de <see cref="Shown"/>.
+    /// </summary>
+    private static Guid HostTrackId(string source) =>
+        new(SHA256.HashData(Encoding.UTF8.GetBytes("jam:" + source)).AsSpan(0, 16));
 
     /// <summary>Arrête la lecture locale (commande de la synchro : elle ne doit pas partir chez l'hôte).</summary>
     private async Task PauseLocalAsync()
