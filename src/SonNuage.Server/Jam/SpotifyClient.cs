@@ -63,11 +63,20 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
     /// <summary>Nom affiché et identifiant du compte (<c>/v1/me</c>), pour confirmer la liaison.</summary>
     public async Task<string?> DisplayNameAsync(string accessToken, CancellationToken ct)
     {
-        using var req = Get("https://api.spotify.com/v1/me", accessToken);
-        using var res = await http.SendAsync(req, ct);
-        if (!res.IsSuccessStatusCode) return null;
-        using var doc = JsonDocument.Parse(await res.Content.ReadAsByteArrayAsync(ct));
-        return doc.RootElement.TryGetProperty("display_name", out var n) ? n.GetString() : null;
+        try
+        {
+            using var req = Get("https://api.spotify.com/v1/me", accessToken);
+            using var res = await http.SendAsync(req, ct);
+            if (!res.IsSuccessStatusCode) return null;
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsByteArrayAsync(ct));
+            return doc.RootElement.TryGetProperty("display_name", out var n) ? n.GetString() : null;
+        }
+        catch (Exception ex) when (Unreachable(ex, ct) || ex is JsonException)
+        {
+            // Le nom n'est qu'un confort : les jetons s'enregistrent sans lui.
+            log.LogInformation("Nom du compte Spotify illisible : {Error}", ex.Message);
+            return null;
+        }
     }
 
     /// <summary>Hôtes spclient + dealer à utiliser pour ce compte.</summary>
@@ -102,7 +111,7 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
                 if (res.IsSuccessStatusCode && ParseTrackMetadata(await res.Content.ReadAsByteArrayAsync(ct)) is { } meta) return meta;
                 log.LogDebug("Métadonnées Spotify de {Track} : {Status}, page d'intégration en secours", trackId, (int)res.StatusCode);
             }
-            catch (HttpRequestException ex)
+            catch (Exception ex) when (Unreachable(ex, ct))
             {
                 log.LogDebug(ex, "Métadonnées Spotify de {Track} indisponibles, page d'intégration en secours", trackId);
             }
@@ -269,6 +278,38 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
     public async Task<IReadOnlyList<SpotifySearchHit>> SearchAsync(string accessToken, string query, CancellationToken ct)
     {
         var hash = await SearchTracksHashAsync(ct);
+        // Créées à la demande : le repli n'existe (et n'est à libérer) que si la première échoue.
+        Func<HttpRequestMessage>[] requests =
+        [
+            () => Pathfinder(accessToken, query, hash),
+            () => Get($"https://api.spotify.com/v1/search?type=track&limit=10&q={Uri.EscapeDataString(query)}", accessToken),
+        ];
+        foreach (var make in requests)
+        {
+            using var req = make();
+            var source = req.RequestUri!.Host;
+            try
+            {
+                using var res = await http.SendAsync(req, ct);
+                if (res.IsSuccessStatusCode)
+                {
+                    var hits = ParseSearch(await res.Content.ReadAsByteArrayAsync(ct));
+                    log.LogInformation("Jam : recherche Spotify ({Source}) « {Query} » : {Count} titre(s)", source, query, hits.Count);
+                    return hits;
+                }
+                log.LogInformation("Jam : recherche Spotify ({Source}) : {Status}", source, (int)res.StatusCode);
+            }
+            catch (Exception ex) when (Unreachable(ex, ct))
+            {
+                log.LogInformation("Jam : recherche Spotify ({Source}) impossible : {Error}", source, ex.Message);
+            }
+        }
+        return [];
+    }
+
+    /// <summary>Requête searchTracks du lecteur web (GraphQL « pathfinder »).</summary>
+    private static HttpRequestMessage Pathfinder(string accessToken, string query, string hash)
+    {
         var pathfinder = new HttpRequestMessage(HttpMethod.Post, "https://api-partner.spotify.com/pathfinder/v2/query")
         {
             Content = new StringContent(new JsonObject
@@ -284,28 +325,15 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
         };
         pathfinder.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         pathfinder.Headers.TryAddWithoutValidation("App-Platform", "WebPlayer");
-        foreach (var req in new[] { pathfinder, Get($"https://api.spotify.com/v1/search?type=track&limit=10&q={Uri.EscapeDataString(query)}", accessToken) })
-        {
-            var source = req.RequestUri!.Host;
-            try
-            {
-                using var _ = req;
-                using var res = await http.SendAsync(req, ct);
-                if (res.IsSuccessStatusCode)
-                {
-                    var hits = ParseSearch(await res.Content.ReadAsByteArrayAsync(ct));
-                    log.LogInformation("Jam : recherche Spotify ({Source}) « {Query} » : {Count} titre(s)", source, query, hits.Count);
-                    return hits;
-                }
-                log.LogInformation("Jam : recherche Spotify ({Source}) : {Status}", source, (int)res.StatusCode);
-            }
-            catch (HttpRequestException ex)
-            {
-                log.LogInformation("Jam : recherche Spotify ({Source}) impossible : {Error}", source, ex.Message);
-            }
-        }
-        return [];
+        return pathfinder;
     }
+
+    /// <summary>
+    /// Spotify injoignable : erreur réseau, ou délai du client HTTP dépassé (une annulation qui ne vient pas de
+    /// l'appelant). Ces appels ont un repli ; une vraie annulation, elle, remonte.
+    /// </summary>
+    private static bool Unreachable(Exception ex, CancellationToken ct) =>
+        ex is HttpRequestException || ex is TaskCanceledException && !ct.IsCancellationRequested;
 
     /// <summary>Hash connu de la requête searchTracks (lecteur web de novembre 2026), si la découverte échoue.</summary>
     private const string KnownSearchTracksHash = "b02683192a98dde7966b5e6655a79eeb62713eab703eda9902c932818dd52751";
@@ -338,7 +366,7 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
                 }
             }
         }
-        catch (HttpRequestException ex)
+        catch (Exception ex) when (Unreachable(ex, ct))
         {
             log.LogInformation("Jam : hash de recherche Spotify introuvable ({Error}), hash connu utilisé", ex.Message);
         }
@@ -489,12 +517,24 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
             Content = new StringContent(new JsonObject { ["command"] = command }.ToJsonString(), System.Text.Encoding.UTF8, "application/json"),
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-        using var res = await http.SendAsync(req, ct);
-        var status = (int)res.StatusCode;
-        if (res.IsSuccessStatusCode) log.LogInformation("Jam : commande {Endpoint} envoyée ({Status})", command["endpoint"], status);
-        else log.LogWarning("Jam : commande {Endpoint} refusée ({Status}) : {Body}", command["endpoint"], status,
-            (await res.Content.ReadAsStringAsync(ct)) is { Length: > 300 } b ? b[..300] : await res.Content.ReadAsStringAsync(ct));
-        return status;
+        try
+        {
+            using var res = await http.SendAsync(req, ct);
+            var status = (int)res.StatusCode;
+            if (res.IsSuccessStatusCode) log.LogInformation("Jam : commande {Endpoint} envoyée ({Status})", command["endpoint"], status);
+            else
+            {
+                var body = await res.Content.ReadAsStringAsync(ct);
+                log.LogWarning("Jam : commande {Endpoint} refusée ({Status}) : {Body}", command["endpoint"], status, body.Length > 300 ? body[..300] : body);
+            }
+            return status;
+        }
+        catch (Exception ex) when (Unreachable(ex, ct))
+        {
+            // Pas de réponse : la commande n'est pas passée (0, comme un refus).
+            log.LogWarning("Jam : commande {Endpoint} sans réponse : {Error}", command["endpoint"], ex.Message);
+            return 0;
+        }
     }
 
     /// <summary>
