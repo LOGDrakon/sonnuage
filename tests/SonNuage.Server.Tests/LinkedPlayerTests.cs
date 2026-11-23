@@ -282,19 +282,13 @@ public class LinkedPlayerTests
         var route = new RecordingRoute();
         player.Route = route;
 
-        await SyncAsync(player);
+        await PlayerRouting.BypassAsync(() => player.PlayAsync(Tracks, 0));
 
         Assert.Empty(route.Calls);
         Assert.Equal("A", local.State.Current?.Title);
         // Le contournement reste propre à la synchro : une commande de l'utilisateur ensuite va toujours à l'hôte.
         await player.NextAsync();
         Assert.Equal(["next"], route.Calls);
-
-        static async Task SyncAsync(LinkedPlayer p)
-        {
-            PlayerRouting.Bypass();
-            await p.PlayAsync(Tracks, 0);
-        }
     }
 
     [Fact]

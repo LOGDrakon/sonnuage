@@ -68,7 +68,7 @@ public sealed class LinkedPlayer : IPlayer, IRestorablePlayer, IConnectPlayer, I
 
     /// <summary>
     /// Ce que joue l'hôte d'un Jam quand le son sort chez lui, sinon l'appareil qui joue (celui-ci ou un autre du
-    /// compte). La synchro du Jam (<see cref="PlayerRouting.Bypass"/>) voit toujours le vrai lecteur.
+    /// compte). La synchro du Jam (<see cref="PlayerRouting.BypassAsync"/>) voit toujours le vrai lecteur.
     /// </summary>
     public PlayerState State => PlayerRouting.For(Route)?.Shown ?? (IsRemote ? _remote : _local.State);
 

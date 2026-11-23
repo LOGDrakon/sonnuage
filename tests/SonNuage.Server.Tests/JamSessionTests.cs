@@ -51,6 +51,26 @@ public sealed class JamSessionTests
         await Until(() => ended);
     }
 
+    [Fact]
+    public async Task In_host_only_mode_the_position_ticks_show_the_host()
+    {
+        // La boucle de synchro fait avancer la position affichée : ce qu'elle déclenche doit voir l'hôte, pas la file
+        // locale en pause (la synchro contourne le Jam pour ses propres commandes, pas pour l'affichage).
+        var local = new FakePlayer();
+        var player = new LinkedPlayer(local, local, new SoloLink());
+        await player.RestoreAsync();
+        await player.PlayAsync([Library("Local")], 0);
+        var server = new FakeJamServer(Playing(JamAudio.RemoteOnly));
+        using var jam = await SessionAsync(server, player);
+        await jam.JoinAsync("https://spotify.link/x", JamAudio.RemoteOnly);
+        var seen = new List<string?>();
+        player.StateChanged += () => { lock (seen) seen.Add(player.State.Current?.Title); };
+
+        await Until(() => { lock (seen) return seen.Count >= 3; });
+
+        lock (seen) Assert.All(seen, title => Assert.Equal("Host song", title));
+    }
+
     // ---- Faux serveur ----
 
     private static JamStateDto Playing(JamAudio audio, TrackDto? resolved = null, double position = 30) => new(

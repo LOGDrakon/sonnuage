@@ -272,16 +272,15 @@ public sealed class JamSession : IDisposable, IPlayerRoute
     /// </summary>
     private async Task SyncLoopAsync(CancellationToken ct)
     {
-        // Les commandes de la synchro vont au lecteur local ; seules celles de l'utilisateur vont à l'hôte.
-        PlayerRouting.Bypass();
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 // Un seul appareil du compte synchronise : celui qui joue. Un autre (télécommande) enverrait les mêmes
                 // corrections à ce lecteur, en plus des siennes, et la lecture basculerait sans fin.
+                // Les commandes de la synchro vont au lecteur local ; seules celles de l'utilisateur vont à l'hôte.
                 if (State is { Active: true, Audio: JamAudio.Guest } state && _player is not IConnectPlayer { IsRemote: true })
-                    await SyncOnceAsync(state);
+                    await PlayerRouting.BypassAsync(() => SyncOnceAsync(state));
                 // Hôte seulement : la position affichée avance avec celle de l'hôte (à la cadence du lecteur local).
                 else if (State is { Active: true, Audio: JamAudio.RemoteOnly, IsPlaying: true } && NowMs - _shownTickMs >= ShownTick.TotalMilliseconds)
                 {
@@ -567,11 +566,10 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         new(SHA256.HashData(Encoding.UTF8.GetBytes("jam:" + source)).AsSpan(0, 16));
 
     /// <summary>Arrête la lecture locale (commande de la synchro : elle ne doit pas partir chez l'hôte).</summary>
-    private async Task PauseLocalAsync()
+    private Task PauseLocalAsync() => PlayerRouting.BypassAsync(async () =>
     {
-        PlayerRouting.Bypass();
         if (_player.State.IsPlaying) await _player.TogglePlayAsync();
-    }
+    });
 
     Task IPlayerRoute.TogglePlayAsync() => ControlAsync(new JamControlRequest(State.IsPlaying ? JamControl.Pause : JamControl.Resume));
 

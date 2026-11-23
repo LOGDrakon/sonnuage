@@ -157,14 +157,26 @@ public interface IRoutablePlayer
 }
 
 /// <summary>
-/// Les commandes de la synchro du Jam ne doivent pas être détournées vers l'hôte : elle appelle <see cref="Bypass"/>
-/// au début de sa boucle, et ce marqueur ne vaut que pour son propre flux asynchrone.
+/// Les commandes de la synchro du Jam ne doivent pas être détournées vers l'hôte : elle les passe par
+/// <see cref="BypassAsync"/>, et ce marqueur ne vaut que pour ce flux asynchrone enfant. Pas pour toute la boucle :
+/// ce qu'elle déclenche d'autre (avancée de la position affichée) est lu par l'interface, qui doit voir l'hôte.
 /// </summary>
 public static class PlayerRouting
 {
     private static readonly AsyncLocal<bool> Bypassed = new();
 
+    /// <summary>Contourne la route pour le reste du flux asynchrone en cours (et ce qu'il lance).</summary>
     public static void Bypass() => Bypassed.Value = true;
+
+    /// <summary>
+    /// Exécute ces commandes sur le lecteur local. Méthode asynchrone : le marqueur posé ici ne remonte pas à
+    /// l'appelant, ni avant ni après l'attente.
+    /// </summary>
+    public static async Task BypassAsync(Func<Task> commands)
+    {
+        Bypassed.Value = true;
+        await commands();
+    }
 
     /// <summary>La route à suivre pour une commande de l'utilisateur, ou null pour le lecteur local.</summary>
     public static IPlayerRoute? For(IPlayerRoute? route) => route is { Routes: true } && !Bypassed.Value ? route : null;
