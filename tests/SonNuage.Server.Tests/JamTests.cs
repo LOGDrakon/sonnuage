@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http.Json;
 using System.Text;
 using SonNuage.Contracts;
 using SonNuage.Server.Jam;
@@ -496,5 +498,41 @@ public sealed class JamTests
     {
         // « Titre - Remastered 2009 » sur Spotify, « Titre » dans la bibliothèque : la clé du titre entier ne le trouvait pas.
         Assert.Contains(prefix, JamResolver.LibraryPrefixes(title));
+    }
+}
+
+/// <summary>Endpoints de « Rejoindre un Jam » sur un vrai serveur (sans jamais appeler Spotify).</summary>
+public sealed class JamApiTests(SonNuageFactory factory) : IClassFixture<SonNuageFactory>
+{
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    private async Task<HttpClient> UserAsync(string name)
+    {
+        var admin = await factory.AdminClientAsync();
+        (await admin.PostAsJsonAsync("/api/admin/users", new CreateUserRequest(name, $"{name}-password", Roles.User), Ct)).EnsureSuccessStatusCode();
+        return await factory.ClientAsync(name, $"{name}-password");
+    }
+
+    private static Task<HttpResponseMessage> SaveTokenAsync(HttpClient client, string? refresh, string? displayName) =>
+        client.PutAsJsonAsync("/api/me/jam/spotify/token",
+            new MusicServiceTokenRequest(SonNuage.Contracts.Jam.Spotify, "fake-access", refresh, 3600, displayName), Ct);
+
+    [Fact]
+    public async Task An_oversized_refresh_token_is_refused_and_a_long_name_is_cut()
+    {
+        var client = await UserAsync("jam-limits");
+        Assert.Equal(HttpStatusCode.BadRequest, (await SaveTokenAsync(client, new string('r', SonNuage.Contracts.Jam.MaxTokenLength + 1), "Nom")).StatusCode);
+
+        var saved = await SaveTokenAsync(client, "fake-refresh", new string('n', 500));
+        var account = await saved.EnsureSuccessStatusCode().Content.ReadFromJsonAsync<MusicServiceAccountDto>(Ct);
+        Assert.Equal(200, account!.DisplayName!.Length);
+    }
+
+    [Fact]
+    public async Task An_unknown_listening_mode_is_refused()
+    {
+        var client = await UserAsync("jam-mode");
+        using var body = new StringContent("""{"link":"https://open.spotify.com/socialsession/3t2Yn4EKMk4APNPw22vlZg","audio":7}""", Encoding.UTF8, "application/json");
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/api/me/jam/join", body, Ct)).StatusCode);
     }
 }

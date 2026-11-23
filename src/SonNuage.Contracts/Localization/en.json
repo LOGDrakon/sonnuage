@@ -260,7 +260,8 @@
       "notOnSpotify": "This track wasn’t found on Spotify (same song, same version), so it can’t be played in the Jam.",
       "notFollowing": "No Jam is being followed, or the host isn’t playing anything right now.",
       "controlRefused": "Spotify refused this command: the Jam host may not let guests control playback.",
-      "notConnected": "Connect your Spotify account first."
+      "notConnected": "Connect your Spotify account first.",
+      "audio": "Unknown listening mode."
     }
   },
   "login": {

@@ -260,7 +260,8 @@
       "notOnSpotify": "Ce titre n’a pas été trouvé sur Spotify (même morceau, même version) : il ne peut pas être joué dans le Jam.",
       "notFollowing": "Aucun Jam suivi, ou l’hôte ne joue rien pour le moment.",
       "controlRefused": "Spotify refuse cette commande : l’hôte du Jam ne laisse peut-être pas les invités piloter la lecture.",
-      "notConnected": "Reliez d’abord votre compte Spotify."
+      "notConnected": "Reliez d’abord votre compte Spotify.",
+      "audio": "Mode d’écoute inconnu."
     }
   },
   "login": {

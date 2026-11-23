@@ -15,6 +15,8 @@ namespace SonNuage.Server.Api;
 /// </summary>
 public static class JamEndpoints
 {
+    private const int MaxDisplayName = 200;
+
     public static void MapJamEndpoints(this IEndpointRouteBuilder app)
     {
         var g = app.MapGroup("/api/me/jam").RequireAuthorization().WithTags("Me");
@@ -28,14 +30,18 @@ public static class JamEndpoints
         {
             if (req.Service != Contracts.Jam.Spotify) return Results.Problem(Tx.Key("errors.jam.service"), statusCode: 400);
             var access = req.AccessToken?.Trim() ?? "";
-            if (access.Length is 0 or > Contracts.Jam.MaxTokenLength) return Results.Problem(Tx.Key("errors.jam.token"), statusCode: 400);
+            var refresh = req.RefreshToken?.Trim();
+            if (access.Length is 0 or > Contracts.Jam.MaxTokenLength || refresh?.Length > Contracts.Jam.MaxTokenLength)
+                return Results.Problem(Tx.Key("errors.jam.token"), statusCode: 400);
             var userId = http.User.UserId();
             // Nom affiché : celui donné par l'appli, sinon demandé au service. Pas de validation du jeton ici : l'API Web
             // de Spotify limite fortement ce type de jeton (429) ; un jeton refusé se verra au premier « join ».
             var displayName = req.DisplayName?.Trim();
             if (string.IsNullOrEmpty(displayName)) displayName = await client.DisplayNameAsync(access, ct);
+            // Un nom (de l'appli ou de Spotify) n'est qu'un affichage : coupé plutôt que refusé.
+            if (displayName?.Length > MaxDisplayName) displayName = displayName[..MaxDisplayName];
             var expires = DateTimeOffset.UtcNow.AddSeconds(req.ExpiresInSeconds is > 0 and < 86_400 ? req.ExpiresInSeconds : 3600);
-            await tokens.SaveAsync(db, userId, access, req.RefreshToken?.Trim(), expires, displayName, ct);
+            await tokens.SaveAsync(db, userId, access, string.IsNullOrEmpty(refresh) ? null : refresh, expires, displayName, ct);
             return Results.Ok(await SpotifyTokens.AccountAsync(db, userId, ct));
         });
 
@@ -55,6 +61,8 @@ public static class JamEndpoints
             if (link.Length is 0 or > Contracts.Jam.MaxLinkLength) return Results.Problem(Tx.Key("errors.jam.link"), statusCode: 400);
             var service = JamJoinRequest.Service(link) ?? Contracts.Jam.Spotify;
             if (service != Contracts.Jam.Spotify) return Results.Problem(Tx.Key("errors.jam.service"), statusCode: 400);
+            // Une énumération JSON accepte n'importe quel nombre : un mode inconnu ne doit pas devenir un suivi bancal.
+            if (!Enum.IsDefined(req.Audio)) return Results.Problem(Tx.Key("errors.jam.audio"), statusCode: 400);
             var userId = http.User.UserId();
             var connected = await db.Users.AnyAsync(u => u.Id == userId && u.SpotifyAccessToken != null, ct);
             if (!connected) return Results.Problem(Tx.Key("errors.jam.notConnected"), statusCode: 409);
