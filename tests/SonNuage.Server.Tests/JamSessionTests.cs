@@ -88,6 +88,28 @@ public sealed class JamSessionTests
         Assert.All(failed, m => Assert.False(string.IsNullOrWhiteSpace(m)));
     }
 
+    [Fact]
+    public async Task A_local_file_shorter_than_the_hosts_track_is_not_restarted_at_its_end()
+    {
+        // Le fichier de la bibliothèque dure 150 s, le titre de l'hôte 200 s. Arrivé au bout, le lecteur web revient au
+        // début, en pause : la synchro ne doit ni le relancer ni y sauter (le morceau recommencerait sans fin).
+        var track = Library("Short", 150);
+        var local = new FakePlayer();
+        var server = new FakeJamServer(Playing(JamAudio.Guest, track, position: 100));
+        using var jam = await SessionAsync(server, local);
+        await jam.JoinAsync("https://spotify.link/x", JamAudio.Guest);
+        await Until(() => local.State.Current?.Id == track.Id && local.State.IsPlaying);
+
+        server.Push(Playing(JamAudio.Guest, track, position: 160));
+        await Task.Delay(500);
+        await local.SeekAsync(0);
+        await local.TogglePlayAsync();
+        await Task.Delay(2000);
+
+        Assert.False(local.State.IsPlaying);
+        Assert.Equal(0, local.State.PositionSeconds);
+    }
+
     // ---- Faux serveur ----
 
     private static JamStateDto Playing(JamAudio audio, TrackDto? resolved = null, double position = 30) => new(

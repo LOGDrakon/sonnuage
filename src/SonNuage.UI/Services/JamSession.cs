@@ -366,6 +366,15 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             return;
         }
 
+        var host = HostPosition(state);
+        // Fin de titre, avant toute bascule : l'hôte va passer au suivant, inutile de se battre sur les dernières
+        // secondes. Et si le fichier local est plus court que le titre de l'hôte, il est fini (le lecteur web revient
+        // alors au début, en pause) : le relancer ou y sauter recommencerait le morceau toutes les 1,5 s.
+        if (state.IsPlaying && host > EndOf(state, track) - EndSeconds)
+        {
+            await SetSpeedAsync(1);
+            return;
+        }
         if (state.IsPlaying != _player.State.IsPlaying && !_player.State.IsBuffering)
         {
             await TogglePlayAsync();
@@ -380,7 +389,6 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         var now = NowMs;
         if (now - _lastSeekAtMs < SeekSettle.TotalMilliseconds) return;
 
-        var host = HostPosition(state);
         var drift = PlayerPositionNow() - host; // > 0 : on est en avance
         // Mesure l'effet du dernier recalage pour apprendre le temps de reprise du lecteur.
         if (!double.IsNaN(_lastSeekTarget))
@@ -388,12 +396,6 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             if (_lastSeekCold) _coldLeadSeconds = Math.Clamp(_coldLeadSeconds - drift * 0.6, 0, 4);
             else _warmLeadSeconds = Math.Clamp(_warmLeadSeconds - drift * 0.6, 0, 1.5);
             _lastSeekTarget = double.NaN;
-        }
-        // Fin de titre : l'hôte va passer au suivant, inutile de se battre sur les dernières secondes.
-        if (state.Track is { DurationSeconds: > 0 } t && host > t.DurationSeconds - 1.5)
-        {
-            await SetSpeedAsync(1);
-            return;
         }
         if (Math.Abs(drift) > DriftSeconds)
         {
@@ -408,6 +410,22 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             await SetSpeedAsync(1 - Math.Clamp(drift * NudgeGain, -MaxNudge, MaxNudge));
         else
             await SetSpeedAsync(1);
+    }
+
+    /// <summary>Marge de fin de titre : en deçà, on laisse finir sans recaler.</summary>
+    private const double EndSeconds = 1.5;
+
+    /// <summary>Durée du fichier local pour ce titre (celle que donne le lecteur, sinon celle du titre), 0 si inconnue.</summary>
+    private double LocalDuration(TrackDto track) =>
+        _player.State is { DurationSeconds: > 0 } st && st.Current?.Id == track.Id ? st.DurationSeconds : track.DurationSeconds;
+
+    /// <summary>Fin du titre joué ici : la plus proche de celle de l'hôte et de celle du fichier local.</summary>
+    private double EndOf(JamStateDto state, TrackDto track)
+    {
+        var end = double.PositiveInfinity;
+        if (state.Track is { DurationSeconds: > 0 } t) end = t.DurationSeconds;
+        if (LocalDuration(track) is > 0 and var local) end = Math.Min(end, local);
+        return end;
     }
 
     /// <summary>
@@ -468,7 +486,13 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         {
             // Pré-chargé dans la file : on y saute (déjà en mémoire tampon, démarrage immédiat).
             await _player.JumpToAsync(at);
-            await SeekAsync(HostPosition(state), cold: false);
+            if (HostPosition(state) < EndOf(state, track) - EndSeconds) await SeekAsync(HostPosition(state), cold: false);
+        }
+        else if (HostPosition(state) >= EndOf(state, track) - EndSeconds)
+        {
+            // L'hôte est déjà au-delà de la fin du fichier local : on attend son titre suivant, sans jouer l'ancien.
+            if (_player.State.IsPlaying) await _player.TogglePlayAsync();
+            return;
         }
         else
         {
