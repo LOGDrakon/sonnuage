@@ -37,27 +37,41 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    /// <summary>Échange un jeton de rafraîchissement contre un jeton d'accès frais.</summary>
+    /// <summary>
+    /// Échange un jeton de rafraîchissement contre un jeton d'accès frais. Null si refusé, injoignable ou illisible :
+    /// l'appelant garde l'ancien jeton (une commande ou un « join » ne doit pas finir en erreur 500).
+    /// </summary>
     public async Task<SpotifyRefresh?> RefreshAsync(string refreshToken, CancellationToken ct)
     {
-        using var body = new FormUrlEncodedContent(new Dictionary<string, string>
+        try
         {
-            ["grant_type"] = "refresh_token",
-            ["refresh_token"] = refreshToken,
-            ["client_id"] = ClientId,
-        });
-        using var res = await http.PostAsync("https://accounts.spotify.com/api/token", body, ct);
-        if (!res.IsSuccessStatusCode)
+            using var body = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = refreshToken,
+                ["client_id"] = ClientId,
+            });
+            using var res = await http.PostAsync("https://accounts.spotify.com/api/token", body, ct);
+            if (!res.IsSuccessStatusCode)
+            {
+                log.LogWarning("Rafraîchissement du jeton Spotify refusé : {Status}", (int)res.StatusCode);
+                return null;
+            }
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsByteArrayAsync(ct));
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || Text(root, "access_token") is not { Length: > 0 } access)
+            {
+                log.LogWarning("Rafraîchissement du jeton Spotify : réponse sans jeton");
+                return null;
+            }
+            var expires = root.TryGetProperty("expires_in", out var ei) && ei.ValueKind == JsonValueKind.Number && ei.TryGetInt32(out var s) && s > 0 ? s : 3600;
+            return new SpotifyRefresh(access, DateTimeOffset.UtcNow.AddSeconds(expires), Text(root, "refresh_token"));
+        }
+        catch (Exception ex) when (Unreachable(ex, ct) || ex is JsonException)
         {
-            log.LogWarning("Rafraîchissement du jeton Spotify refusé : {Status}", (int)res.StatusCode);
+            log.LogWarning("Rafraîchissement du jeton Spotify impossible : {Error}", ex.Message);
             return null;
         }
-        using var doc = JsonDocument.Parse(await res.Content.ReadAsByteArrayAsync(ct));
-        var root = doc.RootElement;
-        if (!root.TryGetProperty("access_token", out var at)) return null;
-        var expires = root.TryGetProperty("expires_in", out var ei) ? ei.GetInt32() : 3600;
-        var newRefresh = root.TryGetProperty("refresh_token", out var rt) ? rt.GetString() : null;
-        return new SpotifyRefresh(at.GetString()!, DateTimeOffset.UtcNow.AddSeconds(expires), newRefresh);
     }
 
     /// <summary>Nom affiché et identifiant du compte (<c>/v1/me</c>), pour confirmer la liaison.</summary>
@@ -332,7 +346,7 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
     /// Spotify injoignable : erreur réseau, ou délai du client HTTP dépassé (une annulation qui ne vient pas de
     /// l'appelant). Ces appels ont un repli ; une vraie annulation, elle, remonte.
     /// </summary>
-    private static bool Unreachable(Exception ex, CancellationToken ct) =>
+    internal static bool Unreachable(Exception ex, CancellationToken ct) =>
         ex is HttpRequestException || ex is TaskCanceledException && !ct.IsCancellationRequested;
 
     /// <summary>Hash connu de la requête searchTracks (lecteur web de novembre 2026), si la découverte échoue.</summary>
@@ -472,9 +486,13 @@ public sealed class SpotifyClient(HttpClient http, ILogger<SpotifyClient> log)
             },
             _ => null!,
         };
+        // Position sans sens (NaN, infini) : pas de commande ; sinon bornée à un jour avant la conversion en long.
+        if (positionSeconds is { } p && action == JamControl.Seek && !double.IsFinite(p)) return null;
         return command is null ? null : Logged(command);
-        static long Ms(double seconds) => (long)Math.Round(Math.Max(0, seconds) * 1000);
+        static long Ms(double seconds) => (long)Math.Round(Math.Clamp(seconds, 0, MaxSeekSeconds) * 1000);
     }
+
+    private const double MaxSeekSeconds = 24 * 3600;
 
     /// <summary>Ajoute un titre à la file de l'hôte (dans un Jam : la file commune).</summary>
     public static JsonObject QueueCommand(string trackUri) => Logged(new JsonObject

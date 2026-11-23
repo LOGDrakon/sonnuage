@@ -200,6 +200,51 @@ public sealed class JamTests
         Assert.Equal("3t2Yn4EKMk4APNPw22vlZg", await SpotifyLink.ResolveAsync(new HttpClient(handler), "spotify.link/PEogbB1787b", CancellationToken.None));
     }
 
+    [Fact]
+    public async Task A_short_link_that_cannot_be_reached_is_a_bad_link_not_an_error()
+    {
+        // DNS en échec ou délai dépassé : le lien est refusé (400), pas une erreur 500.
+        var handler = new RecordingHandler(_ => throw new HttpRequestException("dns"));
+        Assert.Null(await SpotifyLink.ResolveAsync(new HttpClient(handler), "https://spotify.link/PEogbB1787b", CancellationToken.None));
+        var slow = new RecordingHandler(_ => throw new TaskCanceledException("timeout"));
+        Assert.Null(await SpotifyLink.ResolveAsync(new HttpClient(slow), "https://spotify.link/PEogbB1787b", CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("""{"access_token":""")]
+    [InlineData("""{"access_token":7,"expires_in":3600}""")]
+    [InlineData("""[1]""")]
+    public async Task A_failed_token_refresh_is_null_not_an_exception(string? body)
+    {
+        // Réseau en panne ou réponse illisible : comme un refus, le suivi garde son jeton et réessaiera.
+        var handler = new RecordingHandler(_ => body is null
+            ? throw new HttpRequestException("down")
+            : new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(body) });
+        var client = new SpotifyClient(new HttpClient(handler), Microsoft.Extensions.Logging.Abstractions.NullLogger<SpotifyClient>.Instance);
+        Assert.Null(await client.RefreshAsync("refresh", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_token_refresh_reads_the_new_token()
+    {
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            { Content = new StringContent("""{"access_token":"new","expires_in":1800,"refresh_token":"r2"}""") });
+        var client = new SpotifyClient(new HttpClient(handler), Microsoft.Extensions.Logging.Abstractions.NullLogger<SpotifyClient>.Instance);
+        var fresh = await client.RefreshAsync("refresh", CancellationToken.None);
+        Assert.Equal(("new", "r2"), (fresh!.AccessToken, fresh.RefreshToken));
+    }
+
+    [Theory]
+    [InlineData(1e300, 86_400_000)]
+    [InlineData(-5, 0)]
+    public void A_seek_position_is_kept_within_a_day(double seconds, long expectedMs) =>
+        Assert.Equal(expectedMs, (long)SpotifyClient.ControlCommand(JamControl.Seek, seconds)!["position"]!);
+
+    [Fact]
+    public void A_seek_to_an_unreal_position_is_not_a_command() =>
+        Assert.Null(SpotifyClient.ControlCommand(JamControl.Seek, double.NaN));
+
     private sealed class RecordingHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
     {
         public List<Uri> Requests { get; } = [];

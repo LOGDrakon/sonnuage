@@ -26,11 +26,24 @@ public static partial class SpotifyLink
 
     /// <summary>
     /// Le jeton de Jam d'un lien : direct tout de suite, sinon le lien court est suivi (jusqu'à 6 sauts) pour atteindre
-    /// l'URL <c>socialsession</c>. Null si rien ne s'y trouve.
+    /// l'URL <c>socialsession</c>. Null si rien ne s'y trouve, ou si le lien court ne répond pas (DNS, délai) : un lien
+    /// inutilisable, pas une erreur du serveur.
     /// </summary>
     public static async Task<string?> ResolveAsync(HttpClient http, string link, CancellationToken ct)
     {
         if (FromText(link) is { } direct) return direct;
+        try
+        {
+            return await FollowAsync(http, link, ct);
+        }
+        catch (Exception ex) when (SpotifyClient.Unreachable(ex, ct))
+        {
+            return null;
+        }
+    }
+
+    private static async Task<string?> FollowAsync(HttpClient http, string link, CancellationToken ct)
+    {
         var uri = Normalize(link);
         for (var hop = 0; hop < 6 && uri is not null && IsSpotify(uri); hop++)
         {

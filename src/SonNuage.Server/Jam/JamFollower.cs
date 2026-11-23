@@ -594,8 +594,10 @@ public sealed class JamFollower : IAsyncDisposable
             using var scope = _scopes.CreateScope();
             await scope.ServiceProvider.GetRequiredService<SpotifyClient>().LeaveAsync(session.Hosts, accessToken, session.Id, timeout.Token);
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or ObjectDisposedException)
+        catch (Exception ex)
         {
+            // Tout, même une réponse illisible (JsonException) ou la base : l'échec ne doit pas remonter par
+            // DisposeAsync jusqu'à /leave ou /join.
             _log.LogInformation("Jam : impossible de quitter la session côté Spotify ({Error})", ex.Message);
         }
     }
