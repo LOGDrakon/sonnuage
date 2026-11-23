@@ -564,6 +564,8 @@ public sealed class JamSession : IDisposable, IPlayerRoute
 
     Task IPlayerRoute.SetPlayingAsync(bool playing) => ControlAsync(new JamControlRequest(playing ? JamControl.Resume : JamControl.Pause));
 
+    void IPlayerRoute.HoldLocalAudio() { }
+
     Task IPlayerRoute.SeekAsync(double seconds) => ControlAsync(new JamControlRequest(JamControl.Seek, seconds));
 
     Task IPlayerRoute.NextAsync() => ControlAsync(new JamControlRequest(JamControl.Next));

@@ -128,6 +128,11 @@ public interface IPlayerRoute
     /// notification) et que le lecteur local, muet ou en retard sur l'hôte, ne peut pas traduire en bascule.
     /// </summary>
     Task SetPlayingAsync(bool playing);
+    /// <summary>
+    /// Le système a coupé le son local (casque débranché, focus audio perdu) : la synchro ne doit pas le relancer.
+    /// L'hôte continue ; la prochaine commande de lecture de l'utilisateur lève la retenue au lieu d'aller à l'hôte.
+    /// </summary>
+    void HoldLocalAudio();
     Task SeekAsync(double seconds);
     Task NextAsync();
     Task PreviousAsync();

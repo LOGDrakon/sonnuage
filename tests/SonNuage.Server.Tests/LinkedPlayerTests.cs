@@ -173,6 +173,7 @@ public class LinkedPlayerTests
         public List<string> Calls { get; } = [];
         public Task TogglePlayAsync() { Calls.Add("toggle"); return Task.CompletedTask; }
         public Task SetPlayingAsync(bool playing) { Calls.Add(playing ? "resume" : "pause"); return Task.CompletedTask; }
+        public void HoldLocalAudio() => Calls.Add("hold");
         public Task SeekAsync(double seconds) { Calls.Add($"seek {seconds}"); return Task.CompletedTask; }
         public Task NextAsync() { Calls.Add("next"); return Task.CompletedTask; }
         public Task PreviousAsync() { Calls.Add("previous"); return Task.CompletedTask; }
