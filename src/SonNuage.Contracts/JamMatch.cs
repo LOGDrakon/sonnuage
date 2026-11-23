@@ -134,7 +134,7 @@ public static partial class JamMatch
     }
 
     /// <summary>Le nom du morceau sans suffixes (parenthèses, crochets, tiret) ni « feat. … ».</summary>
-    private static string CoreTitle(string title)
+    public static string CoreTitle(string title)
     {
         var core = Brackets().Replace(title, " ");
         core = DashTail().Replace(core, "");

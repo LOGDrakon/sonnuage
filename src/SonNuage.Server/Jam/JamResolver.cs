@@ -20,12 +20,12 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
     /// <summary>Cherche dans la bibliothèque. Trouvé : la piste ; sinon null.</summary>
     public async Task<TrackDto?> FindInLibraryAsync(SonNuageDbContext db, Guid userId, JamTrackDto track, CancellationToken ct)
     {
-        var titleKey = NameNormalizer.Key(track.Title);
-        if (titleKey.Length == 0) return null;
+        if (LibraryPrefixes(track.Title) is not [var full, ..] prefixes) return null;
         // SearchKey commence par la clé du titre (voir LibraryIndexer) : un titre identique se filtre en base, au lieu de
         // trier en mémoire 200 pistes prises au hasard parmi celles qui contiennent le mot (« Home », « Intro »…).
-        var prefix = titleKey + " ";
-        var candidates = await db.Tracks.AsNoTracking().Where(t => t.SearchKey.StartsWith(prefix)).Take(500).ToListAsync(ct);
+        var bare = prefixes[^1];
+        var candidates = await db.Tracks.AsNoTracking()
+            .Where(t => t.SearchKey.StartsWith(full) || t.SearchKey.StartsWith(bare)).Take(500).ToListAsync(ct);
         // Origine des fichiers inconnue (souvent un clip importé) : tolérance de durée d'une vidéo.
         var best = JamMatch.Best(track, candidates, t => new JamCandidate(t.Title, t.ArtistName, t.DurationSeconds, null, JamSourceKind.Video));
         Trace(track, "bibliothèque", candidates.Count, best is { } b ? $"« {b.Item.Title} » — {b.Item.ArtistName}" : null, best?.Verdict);
@@ -33,6 +33,19 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
         if (match is null) return null;
         var dto = await LibraryEndpoints.TracksInOrderAsync(db, userId, [match.Id], ct);
         return dto.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Débuts de SearchKey à chercher : la clé du titre entier, et celle du nom seul (sans « - Remastered 2009 » ni
+    /// « feat. … », que la clé ne retire pas). <see cref="JamMatch"/> juge ensuite la version. Vide si le titre n'a pas
+    /// de clé.
+    /// </summary>
+    public static IReadOnlyList<string> LibraryPrefixes(string title)
+    {
+        var full = NameNormalizer.Key(title);
+        if (full.Length == 0) return [];
+        var bare = NameNormalizer.Key(JamMatch.CoreTitle(title));
+        return bare.Length == 0 || bare == full ? [full + " "] : [full + " ", bare + " "];
     }
 
     /// <summary>État d'un import déjà lancé pour cette vidéo : terminé (piste), en cours, ou échoué.</summary>

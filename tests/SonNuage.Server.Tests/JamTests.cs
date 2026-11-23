@@ -405,4 +405,15 @@ public sealed class JamTests
         command.Remove("logging_params");
         Assert.Equal("""{"endpoint":"play","context":{"uri":"spotify:track:abc","url":"context://spotify:track:abc","metadata":{}},"options":{"skip_to":{"track_uri":"spotify:track:abc"}}}""", command.ToJsonString());
     }
+
+    [Theory]
+    [InlineData("Here Comes The Sun - Remastered 2009", "herecomesthesun ")]
+    [InlineData("Stereo Hearts (feat. Adam Levine)", "stereohearts ")]
+    [InlineData("Song feat. Someone", "song ")]
+    [InlineData("Hide and Seek", "hideandseek ")]
+    public void The_library_is_searched_by_the_bare_title_too(string title, string prefix)
+    {
+        // « Titre - Remastered 2009 » sur Spotify, « Titre » dans la bibliothèque : la clé du titre entier ne le trouvait pas.
+        Assert.Contains(prefix, JamResolver.LibraryPrefixes(title));
+    }
 }
