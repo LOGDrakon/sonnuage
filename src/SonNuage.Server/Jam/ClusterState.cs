@@ -71,7 +71,8 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
     {
         if (ps.ValueKind != JsonValueKind.Object) return null;
         string? uri = null, title = null;
-        if (ps.TryGetProperty("track", out var t) && t.ValueKind == JsonValueKind.Object)
+        var hasTrack = ps.TryGetProperty("track", out var t) && t.ValueKind == JsonValueKind.Object;
+        if (hasTrack)
         {
             uri = Text(t, "uri");
             if (t.TryGetProperty("metadata", out var md) && md.ValueKind == JsonValueKind.Object) title = Text(md, "title");
@@ -80,8 +81,9 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
         var timestamp = Num(ps, "timestamp");
         var duration = Num(ps, "duration");
         var paused = ps.TryGetProperty("is_paused", out var p) && (p.ValueKind == JsonValueKind.True || p.ValueKind == JsonValueKind.String && p.GetString() == "true");
-        // Sans URI de titre, l'état n'apporte rien.
-        if (uri is null) return null;
+        // Sans titre, rien ne joue chez l'hôte (file finie, rien chargé) : un état arrêté, pas une absence d'état. Un
+        // titre illisible, lui, ne dit rien : ignoré.
+        if (uri is null) return hasTrack ? null : Stopped(timestamp);
         var next = new List<string>();
         if (ps.TryGetProperty("next_tracks", out var nt) && nt.ValueKind == JsonValueKind.Array)
             foreach (var t2 in nt.EnumerateArray())
@@ -89,6 +91,9 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
                     next.Add(u2);
         return new ClusterState(uri, title, position, timestamp, paused, duration, next);
     }
+
+    /// <summary>L'hôte ne joue aucun titre.</summary>
+    private static ClusterState Stopped(long timestamp) => new(null, null, 0, timestamp, IsPaused: true, 0);
 
     /// <summary>Chaîne, ou null si absente ou d'un autre type (un champ inattendu ne doit pas couper le flux).</summary>
     private static string? Text(JsonElement e, string name) =>
@@ -136,6 +141,7 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
         long timestamp = 0, position = 0, duration = 0;
         var paused = false;
         string? uri = null;
+        var hasTrack = false;
         var next = new List<string>();
         foreach (var f in Fields(ps))
         {
@@ -145,11 +151,11 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
                 case 10: position = f.Varint; break;
                 case 11: duration = f.Varint; break;
                 case 13: paused = f.Varint != 0; break;
-                case 7 when f.Bytes is not null: uri = TrackUriProto(f.Bytes); break;
+                case 7 when f.Bytes is not null: hasTrack = true; uri = TrackUriProto(f.Bytes); break;
                 case 20 when f.Bytes is not null: if (TrackUriProto(f.Bytes) is { } u) next.Add(u); break;
             }
         }
-        return uri is null ? null : new ClusterState(uri, null, position, timestamp, paused, duration, next);
+        return uri is null ? (hasTrack ? null : Stopped(timestamp)) : new ClusterState(uri, null, position, timestamp, paused, duration, next);
     }
 
     /// <summary>ProvidedTrack.uri (champ 1).</summary>

@@ -279,10 +279,14 @@ public sealed class JamTests
     }
 
     [Fact]
-    public void A_state_without_a_track_is_ignored()
+    public void A_state_without_a_track_means_nothing_plays()
     {
-        var json = """{"player_state":{"position_as_of_timestamp":"0","is_paused":true}}""";
-        Assert.Null(ClusterState.Parse(Encoding.UTF8.GetBytes(json)));
+        // L'hôte n'a plus rien (file finie) : les invités doivent le voir arrêté, pas garder le dernier titre « en lecture ».
+        var json = """{"player_state":{"position_as_of_timestamp":"0","is_paused":false}}""";
+        var state = ClusterState.Parse(Encoding.UTF8.GetBytes(json));
+        Assert.NotNull(state);
+        Assert.Null(state.TrackId);
+        Assert.True(state.IsPaused);
     }
 
     [Fact]

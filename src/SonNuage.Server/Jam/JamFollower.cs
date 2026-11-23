@@ -321,6 +321,9 @@ public sealed class JamFollower : IAsyncDisposable
     /// <summary>Traite un nouvel état de l'hôte : si le titre a changé, (re)résout ; sinon met à jour position/pause.</summary>
     private async Task ProcessAsync(string accessToken, ClusterState cluster, CancellationToken ct)
     {
+        // Arrêté, l'hôte peut ne plus annoncer d'appareil actif : on garde le dernier, cible de « reprendre ».
+        if (cluster.ActiveDeviceId is not { Length: > 0 } && _lastCluster?.ActiveDeviceId is { Length: > 0 } device)
+            cluster = cluster with { ActiveDeviceId = device };
         _lastCluster = cluster;
         if (cluster.ServerTimestampMs > 0)
         {
