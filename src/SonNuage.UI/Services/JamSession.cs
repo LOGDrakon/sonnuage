@@ -568,6 +568,9 @@ public sealed class JamSession : IDisposable, IPlayerRoute
     /// <summary>Arrête la lecture locale (commande de la synchro : elle ne doit pas partir chez l'hôte).</summary>
     private Task PauseLocalAsync() => PlayerRouting.BypassAsync(async () =>
     {
+        // Un autre appareil du compte joue (ce lecteur n'est qu'une télécommande) : basculer mettrait en pause, ou
+        // relancerait, cet appareil-là, qui ne joue pas le Jam.
+        if (_player is IConnectPlayer { IsRemote: true }) return;
         if (_player.State.IsPlaying) await _player.TogglePlayAsync();
     });
 
