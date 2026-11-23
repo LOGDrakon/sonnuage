@@ -23,6 +23,11 @@ public sealed class JamFollower : IAsyncDisposable
     private readonly Guid _userId;
     private readonly string _joinToken;
     private readonly JamAudio _audio;
+    /// <summary>Le compte peut demander des téléchargements (rôle lu au « join ») : sans ce droit, pas d'import serveur.</summary>
+    private readonly bool _mayImport;
+    /// <summary>Imports lancés par ce suivi : garde-fou en plus du quota (un hôte qui saute de titre en titre).</summary>
+    private int _imports;
+    private const int MaxImports = 30;
     private readonly IServiceScopeFactory _scopes;
     private readonly Action<Guid, JamStateDto> _publish;
     private readonly Action<JamFollower> _ended;
@@ -41,12 +46,13 @@ public sealed class JamFollower : IAsyncDisposable
     private string? _lastTrackId;
     private string? _hostName;
 
-    public JamFollower(Guid userId, string joinToken, JamAudio audio, IServiceScopeFactory scopes, Action<Guid, JamStateDto> publish,
+    public JamFollower(Guid userId, string joinToken, JamAudio audio, bool mayImport, IServiceScopeFactory scopes, Action<Guid, JamStateDto> publish,
         Action<JamFollower> ended, ILogger log)
     {
         _userId = userId;
         _joinToken = joinToken;
         _audio = audio;
+        _mayImport = mayImport;
         _scopes = scopes;
         _publish = publish;
         _ended = ended;
@@ -408,8 +414,14 @@ public sealed class JamFollower : IAsyncDisposable
                     return;
                 }
                 // Son chez l'invité : import YouTube pour pouvoir jouer. En « distant seul », inutile.
-                if (_audio != JamAudio.Guest) { SetPrep(trackId, prep, JamResolve.Unavailable, null); return; }
-                videoId = await resolver.StartImportAsync(db, prep.Meta, ct);
+                // Pas le droit d'importer, ou trop d'imports pour ce Jam : introuvable ici, l'appareil joue YouTube en direct.
+                if (_audio != JamAudio.Guest || !_mayImport || Interlocked.Increment(ref _imports) > MaxImports)
+                {
+                    SetPrep(trackId, prep, JamResolve.Unavailable, null);
+                    return;
+                }
+                // Refus du quota (ou du rôle, relu en base) : null, retenté plus tard comme un import raté.
+                videoId = await resolver.StartImportAsync(db, _userId, prep.Meta, ct);
             }
             if (videoId is null) { Fail(trackId, prep, RetryLater); return; }
             SetPrep(trackId, prep, JamResolve.Importing, null);

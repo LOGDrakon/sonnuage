@@ -68,7 +68,8 @@ public static class JamEndpoints
             if (!connected) return Results.Problem(Tx.Key("errors.jam.notConnected"), statusCode: 409);
             var token = await SpotifyLink.ResolveAsync(client.Http, link, ct);
             if (token is null) return Results.Problem(Tx.Key("errors.jam.badLink"), statusCode: 400);
-            if (!await hub.JoinAsync(userId, token, req.Audio, ct)) return Results.Problem(Tx.Key("errors.jam.refused"), statusCode: 409);
+            // Droit d'importer pris au « join » (rôle du jeton) ; le rôle en base et le quota sont revus à chaque import.
+            if (!await hub.JoinAsync(userId, token, req.Audio, http.User.CanRequest(), ct)) return Results.Problem(Tx.Key("errors.jam.refused"), statusCode: 409);
             return Results.Text(JamHub.Serialize(hub.Current(userId)), "application/json");
         });
 

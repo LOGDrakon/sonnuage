@@ -7,6 +7,16 @@ using SonNuage.Server.Youtube;
 
 namespace SonNuage.Server.Jam;
 
+/// <summary>Droit d'un compte à faire importer les titres d'un Jam sur le serveur.</summary>
+public enum JamImportRight
+{
+    Allowed,
+    /// <summary>Ni admin ni contributeur accepté d'office : l'appareil joue YouTube en direct.</summary>
+    NotAllowed,
+    /// <summary>Quota de demandes des dernières 24 h atteint.</summary>
+    Quota,
+}
+
 /// <summary>Issue d'une résolution : où on en est, et la piste si elle est jouable.</summary>
 public sealed record JamResolution(JamResolve State, TrackDto? Track, string? VideoId = null);
 
@@ -63,19 +73,30 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
     }
 
     /// <summary>
-    /// Lance l'import YouTube du titre (meilleur résultat sûr). Renvoie l'identifiant de la vidéo mise en file, ou null
-    /// si aucun résultat convaincant. Le suivi d'avancement se fait ensuite via <see cref="CheckImportAsync"/>.
+    /// Lance l'import YouTube du titre (meilleur résultat sûr) pour le compte, s'il en a le droit (voir
+    /// <see cref="ImportRightAsync"/>). Renvoie l'identifiant de la vidéo mise en file, ou null si l'import est refusé
+    /// ou sans résultat convaincant. Le suivi d'avancement se fait ensuite via <see cref="CheckImportAsync"/>.
     /// </summary>
-    public async Task<string?> StartImportAsync(SonNuageDbContext db, JamTrackDto track, CancellationToken ct)
+    public async Task<string?> StartImportAsync(SonNuageDbContext db, Guid userId, JamTrackDto track, CancellationToken ct)
     {
         try
         {
+            // Avant toute recherche : un compte sans droit ne fait même pas tourner yt-dlp.
+            var right = await ImportRightAsync(db, userId, DateTimeOffset.UtcNow, ct);
+            if (right != JamImportRight.Allowed)
+            {
+                log.LogInformation("Jam : « {Title} » — {Artist} : import refusé au compte ({Right})", track.Title, track.Artist, right);
+                return null;
+            }
             var query = new MatchQuery(track.Artist, track.Title, track.DurationSeconds > 0 ? track.DurationSeconds : null);
             var ranked = await ytDlp.MatchAsync(query, options.Value.MatchOfficialMinScore, ct);
             var best = PickImport(ranked, track);
             Trace(track, "import YouTube", ranked.Count, best is { } p ? $"« {p.Entry.Title} » — {p.Entry.Channel}" : null, null);
             if (best is null) return null;
-            await importer.EnqueueAsync(db, [ImportVideo(best.Entry, track)], albumHint: null, subscriptionId: null, ct);
+            var video = ImportVideo(best.Entry, track);
+            var result = await importer.EnqueueAsync(db, [video], albumHint: null, subscriptionId: null, ct);
+            // Vidéo déjà importée ou en cours : rien de nouveau, rien à compter.
+            if (result.Queued > 0) await RecordImportAsync(db, userId, video, DateTimeOffset.UtcNow, ct);
             return best.Entry.Id;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -83,6 +104,43 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
             log.LogWarning(ex, "Import YouTube du titre de Jam « {Title} » impossible", track.Title);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Un import lancé par un Jam est une demande de téléchargement comme une autre : admin, ou contributeur dont les
+    /// demandes sont acceptées d'office (sinon l'import passerait outre l'approbation), dans son quota sur 24 h.
+    /// </summary>
+    internal static async Task<JamImportRight> ImportRightAsync(SonNuageDbContext db, Guid userId, DateTimeOffset now, CancellationToken ct)
+    {
+        var user = await db.Users.AsNoTracking().Where(u => u.Id == userId)
+            .Select(u => new { u.Role, u.RequestsPerDay, u.AutoApproveRequests }).SingleOrDefaultAsync(ct);
+        if (user is null) return JamImportRight.NotAllowed;
+        if (user.Role == Roles.Admin) return JamImportRight.Allowed;
+        if (user.Role != Roles.Contributor || !user.AutoApproveRequests) return JamImportRight.NotAllowed;
+        return await DownloadRequestEndpoints.UsedAsync(db, userId, now, ct) >= user.RequestsPerDay ? JamImportRight.Quota : JamImportRight.Allowed;
+    }
+
+    /// <summary>
+    /// Trace l'import comme une demande acceptée d'office : elle compte dans le quota du jour (même décompte que les
+    /// demandes) et l'admin la voit dans l'historique.
+    /// </summary>
+    internal static async Task RecordImportAsync(SonNuageDbContext db, Guid userId, YoutubeVideoDto video, DateTimeOffset now, CancellationToken ct)
+    {
+        db.DownloadRequests.Add(new DownloadRequest
+        {
+            UserId = userId,
+            VideoId = video.VideoId,
+            Title = video.Title.Length <= 500 ? video.Title : video.Title[..500],
+            Channel = video.Channel is { Length: > 200 } c ? c[..200] : video.Channel,
+            DurationSeconds = video.DurationSeconds is > 0 and < 86_400 ? video.DurationSeconds : null,
+            Note = "Jam Spotify",
+            Decision = DownloadRequestDecision.Accepted,
+            AutoApproved = true,
+            CreatedAt = now,
+            DecidedAt = now,
+            YoutubeItem = await db.YoutubeItems.FirstOrDefaultAsync(i => i.VideoId == video.VideoId, ct),
+        });
+        await db.SaveChangesAsync(ct);
     }
 
     /// <summary>

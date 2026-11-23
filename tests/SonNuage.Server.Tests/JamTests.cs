@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using SonNuage.Contracts;
 using SonNuage.Server.Jam;
 using SonNuage.Server.Youtube;
@@ -508,9 +510,42 @@ public sealed class JamApiTests(SonNuageFactory factory) : IClassFixture<SonNuag
 
     private async Task<HttpClient> UserAsync(string name)
     {
-        var admin = await factory.AdminClientAsync();
-        (await admin.PostAsJsonAsync("/api/admin/users", new CreateUserRequest(name, $"{name}-password", Roles.User), Ct)).EnsureSuccessStatusCode();
+        await CreateAsync(name, Roles.User);
         return await factory.ClientAsync(name, $"{name}-password");
+    }
+
+    private async Task<UserDto> CreateAsync(string name, string role, int? perDay = null, bool? auto = null)
+    {
+        var admin = await factory.AdminClientAsync();
+        var user = (await (await admin.PostAsJsonAsync("/api/admin/users", new CreateUserRequest(name, $"{name}-password", role), Ct))
+            .EnsureSuccessStatusCode().Content.ReadFromJsonAsync<UserDto>(Ct))!;
+        if (perDay is not null || auto is not null)
+            (await admin.PatchAsJsonAsync($"/api/admin/users/{user.Id}", new UpdateUserRequest(null, null, perDay, auto), Ct)).EnsureSuccessStatusCode();
+        return user;
+    }
+
+    [Fact]
+    public async Task A_jam_import_needs_the_right_to_request_and_counts_in_the_quota()
+    {
+        // Un Jam en mode invité importait pour n'importe quel compte, sans quota : c'est une demande comme une autre.
+        var user = await CreateAsync("jam-import-user", Roles.User);
+        var pending = await CreateAsync("jam-import-pending", Roles.Contributor);
+        var auto = await CreateAsync("jam-import-auto", Roles.Contributor, perDay: 1, auto: true);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<SonNuage.Server.Data.SonNuageDbContext>();
+        var adminId = await db.Users.Where(u => u.Username == "admin").Select(u => u.Id).SingleAsync(Ct);
+        var now = DateTimeOffset.UtcNow;
+
+        Assert.Equal(JamImportRight.NotAllowed, await JamResolver.ImportRightAsync(db, user.Id, now, Ct));
+        // Ses demandes attendent un admin : un import direct passerait outre.
+        Assert.Equal(JamImportRight.NotAllowed, await JamResolver.ImportRightAsync(db, pending.Id, now, Ct));
+        Assert.Equal(JamImportRight.Allowed, await JamResolver.ImportRightAsync(db, auto.Id, now, Ct));
+
+        await JamResolver.RecordImportAsync(db, auto.Id, new YoutubeVideoDto("jamimport01", "Artist - Song", "Artist", 200, null, null), now, Ct);
+        Assert.Equal(JamImportRight.Quota, await JamResolver.ImportRightAsync(db, auto.Id, now, Ct));
+        Assert.Equal(JamImportRight.Allowed, await JamResolver.ImportRightAsync(db, adminId, now, Ct));
+        var request = await db.DownloadRequests.SingleAsync(r => r.UserId == auto.Id, Ct);
+        Assert.Equal((SonNuage.Server.Data.DownloadRequestDecision.Accepted, true), (request.Decision, request.AutoApproved));
     }
 
     private static Task<HttpResponseMessage> SaveTokenAsync(HttpClient client, string? refresh, string? displayName) =>

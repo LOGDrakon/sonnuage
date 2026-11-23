@@ -192,7 +192,8 @@ public static class DownloadRequestEndpoints
         await db.SaveChangesAsync(ct);
     }
 
-    private static Task<int> UsedAsync(SonNuageDbContext db, Guid userId, DateTimeOffset now, CancellationToken ct)
+    /// <summary>Demandes du compte sur les dernières 24 h (imports lancés par un Jam compris).</summary>
+    internal static Task<int> UsedAsync(SonNuageDbContext db, Guid userId, DateTimeOffset now, CancellationToken ct)
     {
         var since = now.AddDays(-1);
         return db.DownloadRequests.CountAsync(r => r.UserId == userId && r.CreatedAt > since, ct);

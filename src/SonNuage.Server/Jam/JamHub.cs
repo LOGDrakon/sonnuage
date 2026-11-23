@@ -27,13 +27,15 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
     /// (Re)commence à suivre le Jam désigné par un jeton de partage, dans le mode d'écoute choisi. Rend faux si Spotify
     /// refuse de nous y faire entrer (Jam fini, compte exclu…) : rien n'est alors suivi.
     /// </summary>
-    public async Task<bool> JoinAsync(Guid userId, string joinToken, JamAudio audio, CancellationToken ct)
+    /// <param name="mayImport">Le compte peut demander des téléchargements : les titres absents peuvent être importés sur
+    /// le serveur (sinon l'appareil les joue depuis YouTube en direct).</param>
+    public async Task<bool> JoinAsync(Guid userId, string joinToken, JamAudio audio, bool mayImport, CancellationToken ct)
     {
         var gate = Gate(userId);
         await gate.WaitAsync(ct);
         try
         {
-            return await JoinLockedAsync(userId, joinToken, audio, ct);
+            return await JoinLockedAsync(userId, joinToken, audio, mayImport, ct);
         }
         finally
         {
@@ -41,11 +43,11 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
         }
     }
 
-    private async Task<bool> JoinLockedAsync(Guid userId, string joinToken, JamAudio audio, CancellationToken ct)
+    private async Task<bool> JoinLockedAsync(Guid userId, string joinToken, JamAudio audio, bool mayImport, CancellationToken ct)
     {
         await StopAsync(userId);
         JamFollower? follower = null;
-        follower = new JamFollower(userId, joinToken, audio, scopes, (user, state) => PublishFrom(follower, user, state), Ended, _log);
+        follower = new JamFollower(userId, joinToken, audio, mayImport, scopes, (user, state) => PublishFrom(follower, user, state), Ended, _log);
         _followers[userId] = follower;
         bool joined;
         try
