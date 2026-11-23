@@ -91,13 +91,18 @@ modale l'annonce tout de suite.
   `searchTracks`) ; son hash change avec le lecteur web, il est relu dans son code public (cache 12 h), avec la valeur
   connue en secours. Côté appli, `LinkedPlayer` envoie les commandes de l'utilisateur à `JamSession` (`IPlayerRoute`)
   tant que le Jam est suivi, dans les deux modes ; la synchro garde la main sur le lecteur local
-  (`PlayerRouting.Bypass`). En mode « hôte seulement », la lecture locale s'arrête et le lecteur affiche ce que joue
+  (`PlayerRouting.BypassAsync`, limité à ses propres appels au lecteur). En mode « hôte seulement », la lecture locale s'arrête et le lecteur affiche ce que joue
   l'hôte (`IPlayerRoute.Shown` : titre, suivants, pause, position extrapolée).
-  Sur Android, `JamRoutingPlayer` fait de même pour les contrôleurs autres que l'interface.
+  Sur Android, `JamRoutingPlayer` fait de même pour les contrôleurs autres que l'interface : qui commande se lit au
+  moment de l'appel (`MediaSession.ControllerForCurrentRequest`) ; sans contrôleur (Media3 lui-même, appli balayée des
+  récents), la commande reste locale. En « hôte seulement », la session montre la lecture ou la pause de l'hôte, pour
+  que le casque et la notification basculent dans le bon sens.
   Dans la file affichée, toucher le titre suivant envoie « suivant », un autre est lancé chez l'hôte ; retirer,
   mélanger et répéter sont sans effet (la file est celle de l'hôte). Lecture et pause venues du casque ou de la
   notification partent comme telles (`SetPlayingAsync`). Avec plusieurs appareils du compte, seul celui qui joue
-  synchronise.
+  synchronise. Quand le système coupe le son local (casque débranché, focus audio perdu), la synchro ne le relance
+  pas (`IPlayerRoute.HoldLocalAudio`) : l'hôte continue, et la prochaine lecture demandée reprend ici, sans rien
+  envoyer à l'hôte.
 - **Lien court** (`spotify.link/…`) : suivi à la main, en https et vers des hôtes Spotify seulement (chaque
   redirection est revérifiée), pour que le serveur ne puisse pas être envoyé vers une autre adresse.
 
