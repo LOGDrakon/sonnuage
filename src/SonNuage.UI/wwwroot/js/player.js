@@ -90,6 +90,21 @@ function checkNearEnd() {
   }
 }
 
+/**
+ * Vitesse de lecture (rattrapage discret d'un Jam), hauteur conservée. defaultPlaybackRate aussi : changer de source
+ * remet playbackRate à cette valeur, la vitesse survit donc au titre suivant et au fondu.
+ */
+export function setSpeed(rate) {
+  const r = Math.max(0.5, Math.min(2, rate || 1));
+  for (const el of [audio, audio.other]) {
+    if (!el) continue;
+    el.preservesPitch = true;
+    el.defaultPlaybackRate = r;
+    el.playbackRate = r;
+  }
+  updatePositionState();
+}
+
 export function setCrossfade(seconds) { crossfadeSeconds = Math.max(0, Math.min(5, seconds || 0)); }
 
 // L'élément qui jouait s'éteint pendant que le nouveau monte (courbe à puissance constante : pas de creux au milieu).

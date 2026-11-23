@@ -122,6 +122,21 @@ public sealed class WebPlayer : IPlayer, IRestorablePlayer, IAdoptablePlayer, IA
         await LoadCurrentAsync(autoplay: true);
     }
 
+    /// <summary>Lance la file directement à une position : une seule requête de flux, sans passer par le début (Jam).</summary>
+    public async Task PlayAtAsync(IReadOnlyList<TrackDto> tracks, int startIndex, double startSeconds)
+    {
+        if (tracks.Count == 0) return;
+        _station = null;
+        await ReportCurrentAsync(completed: false);
+        var repeat = _queue.Repeat;
+        _queue.Load(tracks, Math.Clamp(startIndex, 0, tracks.Count - 1), shuffle: false);
+        _queue.Repeat = repeat;
+        await LoadCurrentAsync(autoplay: true, startAt: Math.Max(0, startSeconds));
+    }
+
+    /// <summary>Vitesse de lecture, hauteur conservée (voir player.js).</summary>
+    public async Task SetSpeedAsync(double speed) => await (await ModuleAsync()).InvokeVoidAsync("setSpeed", speed);
+
     public async Task PlayStationAsync(string stationId, IReadOnlyList<TrackDto> tracks)
     {
         if (tracks.Count == 0) return;

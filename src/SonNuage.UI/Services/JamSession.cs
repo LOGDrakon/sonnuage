@@ -272,7 +272,10 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         {
             try
             {
-                if (State is { Active: true, Audio: JamAudio.Guest } state) await SyncOnceAsync(state);
+                // Un seul appareil du compte synchronise : celui qui joue. Un autre (télécommande) enverrait les mêmes
+                // corrections à ce lecteur, en plus des siennes, et la lecture basculerait sans fin.
+                if (State is { Active: true, Audio: JamAudio.Guest } state && _player is not IConnectPlayer { IsRemote: true })
+                    await SyncOnceAsync(state);
                 // Hôte seulement : la position affichée avance avec celle de l'hôte (à la cadence du lecteur local).
                 else if (State is { Active: true, Audio: JamAudio.RemoteOnly, IsPlaying: true } && NowMs - _shownTickMs >= ShownTick.TotalMilliseconds)
                 {
