@@ -157,15 +157,15 @@ public sealed class JamFollower : IAsyncDisposable
             _joined.TrySetResult(true);
             _connected = true;
             if (await client.RegisterReceiverAsync(hosts, accessToken, _deviceId, connectionId, ct) is { } initial)
-                await ProcessAsync(accessToken, initial, ct);
+                await ProcessAsync(initial, ct);
         }
 
-        await PumpAsync(ws, accessToken, ct);
+        await PumpAsync(ws, ct);
         return _over ? Outcome.Over : Outcome.Dropped;
     }
 
     /// <summary>Lit le flux dealer : traite « message » (cluster) et « request » (commandes, auxquelles on répond), avec keepalive.</summary>
-    private async Task PumpAsync(ClientWebSocket ws, string accessToken, CancellationToken ct)
+    private async Task PumpAsync(ClientWebSocket ws, CancellationToken ct)
     {
         // Keepalive à part : annuler un ReceiveAsync de ClientWebSocket ABANDONNE la connexion, on ne le coupe donc jamais.
         using var pumpCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -200,7 +200,7 @@ public sealed class JamFollower : IAsyncDisposable
                     }
                     ms.Write(buffer.Array!, 0, result.Count);
                 } while (!result.EndOfMessage);
-                await HandleFrameAsync(ws, accessToken, ms.ToArray(), ct);
+                await HandleFrameAsync(ws, ms.ToArray(), ct);
             }
             _log.LogInformation("Jam : dealer terminé (état {State})", ws.State);
         }
@@ -222,7 +222,7 @@ public sealed class JamFollower : IAsyncDisposable
     }
 
     /// <summary>Traite une trame dealer selon son type (voir go-librespot) : message (push), request (commande à acquitter), pong.</summary>
-    private async Task HandleFrameAsync(ClientWebSocket ws, string accessToken, byte[] frame, CancellationToken ct)
+    private async Task HandleFrameAsync(ClientWebSocket ws, byte[] frame, CancellationToken ct)
     {
         string? type = null, uri = null, key = null;
         try
@@ -236,7 +236,7 @@ public sealed class JamFollower : IAsyncDisposable
             {
                 if (uri.StartsWith("hm://connect-state/v1/cluster", StringComparison.Ordinal))
                 {
-                    if (ClusterState.ParseClusterUpdate(payload) is { } cluster) await ProcessAsync(accessToken, cluster, ct);
+                    if (ClusterState.ParseClusterUpdate(payload) is { } cluster) await ProcessAsync(cluster, ct);
                 }
                 else if (uri.StartsWith(SessionUpdate.Uri, StringComparison.Ordinal))
                 {
@@ -319,7 +319,7 @@ public sealed class JamFollower : IAsyncDisposable
     }
 
     /// <summary>Traite un nouvel état de l'hôte : si le titre a changé, (re)résout ; sinon met à jour position/pause.</summary>
-    private async Task ProcessAsync(string accessToken, ClusterState cluster, CancellationToken ct)
+    private async Task ProcessAsync(ClusterState cluster, CancellationToken ct)
     {
         // Arrêté, l'hôte peut ne plus annoncer d'appareil actif : on garde le dernier, cible de « reprendre ».
         if (cluster.ActiveDeviceId is not { Length: > 0 } && _lastCluster?.ActiveDeviceId is { Length: > 0 } device)
@@ -337,8 +337,8 @@ public sealed class JamFollower : IAsyncDisposable
         _nextTrackIds = (cluster.NextTrackUris ?? [])
             .Select(u => u.StartsWith("spotify:track:", StringComparison.Ordinal) ? u["spotify:track:".Length..] : null)
             .OfType<string>().Where(id => id != trackId).Distinct().Take(PrefetchAhead).ToList();
-        if (trackId is not null) Prepare(accessToken, trackId, cluster.DurationMs / 1000.0, ct);
-        foreach (var next in _nextTrackIds) Prepare(accessToken, next, 0, ct);
+        if (trackId is not null) Prepare(trackId, cluster.DurationMs / 1000.0, ct);
+        foreach (var next in _nextTrackIds) Prepare(next, 0, ct);
         Publish();
     }
 
@@ -363,7 +363,7 @@ public sealed class JamFollower : IAsyncDisposable
     private long _prepOrder;
 
     /// <summary>Lance (une fois) la préparation d'un titre ; rend son suivi.</summary>
-    private Prep Prepare(string accessToken, string trackId, double durationSeconds, CancellationToken ct)
+    private Prep Prepare(string trackId, double durationSeconds, CancellationToken ct)
     {
         if (_preps.TryGetValue(trackId, out var existing))
         {
@@ -377,18 +377,20 @@ public sealed class JamFollower : IAsyncDisposable
         if (_preps.Count > PrepCacheSize)
             foreach (var old in _preps.Where(p => p.Key != _lastTrackId).OrderBy(p => p.Value.Order).Take(_preps.Count - PrepCacheSize).ToList())
                 _preps.TryRemove(old.Key, out _);
-        _ = Task.Run(() => RunPrepAsync(accessToken, trackId, durationSeconds, prep, ct), ct);
+        _ = Task.Run(() => RunPrepAsync(trackId, durationSeconds, prep, ct), ct);
         return prep;
     }
 
-    private async Task RunPrepAsync(string accessToken, string trackId, double durationSeconds, Prep prep, CancellationToken ct)
+    private async Task RunPrepAsync(string trackId, double durationSeconds, Prep prep, CancellationToken ct)
     {
         try
         {
             using (var scope = _scopes.CreateScope())
             {
                 var client = scope.ServiceProvider.GetRequiredService<SpotifyClient>();
-                var meta = await client.TrackAsync(_session?.Hosts, accessToken, trackId, ct);
+                // Jeton frais à chaque titre : celui de la connexion expire au bout d'une heure, qu'elle peut dépasser.
+                var accessToken = await FreshAccessTokenAsync(ct);
+                var meta = accessToken is null ? null : await client.TrackAsync(_session?.Hosts, accessToken, trackId, ct);
                 // Durée : celle du cluster si connue (celle que joue l'hôte).
                 prep.Meta = meta is null ? null : durationSeconds > 0 ? meta with { DurationSeconds = durationSeconds } : meta;
             }
@@ -462,8 +464,28 @@ public sealed class JamFollower : IAsyncDisposable
 
     private IReadOnlyList<string> _nextTrackIds = [];
 
-    /// <summary>Jeton d'accès frais : rafraîchi et réenregistré s'il expire bientôt.</summary>
+    /// <summary>Un seul rafraîchissement à la fois : deux avec le même jeton de rafraîchissement, et Spotify refuse le
+    /// second (ou en enregistre un déjà remplacé).</summary>
+    private readonly SemaphoreSlim _tokenGate = new(1, 1);
+
+    /// <summary>
+    /// Jeton d'accès frais : rafraîchi et réenregistré s'il expire bientôt. Relu en base une fois la main obtenue : un
+    /// appel qui attendait trouve le jeton que le précédent vient d'enregistrer.
+    /// </summary>
     private async Task<string?> FreshAccessTokenAsync(CancellationToken ct)
+    {
+        await _tokenGate.WaitAsync(ct);
+        try
+        {
+            return await RefreshIfNeededAsync(ct);
+        }
+        finally
+        {
+            _tokenGate.Release();
+        }
+    }
+
+    private async Task<string?> RefreshIfNeededAsync(CancellationToken ct)
     {
         using var scope = _scopes.CreateScope();
         var sp = scope.ServiceProvider;
