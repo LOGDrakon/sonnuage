@@ -20,6 +20,14 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
     private readonly ConcurrentDictionary<Guid, JamStateDto> _states = new();
     private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<Guid, Channel<string>>> _subscribers = new();
 
+    /// <summary>
+    /// Un seul verrou pour l'état diffusé : qui est le suivi du compte, le calcul de son état, l'envoi aux appareils et
+    /// l'abonnement. Les préparations d'un suivi publient depuis plusieurs fils : sans lui, un état « actif » pouvait
+    /// arriver après l'état inactif (suivi arrêté entre la vérification et l'envoi), ou un état plus ancien après un
+    /// plus récent. Tout ce qu'il protège est bref et sans attente.
+    /// </summary>
+    private readonly Lock _lock = new();
+
     /// <summary>Attente maximale de la réponse de Spotify au premier « join », pour dire tout de suite si c'est refusé.</summary>
     private static readonly TimeSpan JoinWait = TimeSpan.FromSeconds(15);
 
@@ -45,10 +53,12 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
 
     private async Task<bool> JoinLockedAsync(Guid userId, string joinToken, JamAudio audio, bool mayImport, CancellationToken ct)
     {
-        await StopAsync(userId);
+        // L'ancien suivi est retiré sans publier d'état inactif : les appareils le prendraient pour la fin du Jam et
+        // cesseraient de suivre, alors que le nouveau va prendre la suite. Son dernier état est oublié.
+        if (Detach(userId, publishInactive: false) is { } previous) await previous.DisposeAsync();
         JamFollower? follower = null;
-        follower = new JamFollower(userId, joinToken, audio, mayImport, scopes, (user, state) => PublishFrom(follower, user, state), Ended, _log);
-        _followers[userId] = follower;
+        follower = new JamFollower(userId, joinToken, audio, mayImport, scopes, build => PublishFrom(follower, userId, build), Ended, _log);
+        lock (_lock) _followers[userId] = follower;
         bool joined;
         try
         {
@@ -59,7 +69,13 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
             // Spotify lent : on laisse le suivi continuer, il finira seul si le « join » échoue.
             return true;
         }
-        if (!joined) await StopAsync(userId);
+        if (!joined)
+        {
+            // Refusé : plus rien n'est suivi, les appareils doivent le savoir (le suivi a pu s'arrêter de lui-même avant
+            // d'être enregistré, sans rien publier). Seulement s'il est encore le suivi du compte.
+            if (Detach(userId, publishInactive: true, only: follower) is { } refused) await refused.DisposeAsync();
+            else PublishInactiveIfIdle(userId);
+        }
         return joined;
     }
 
@@ -69,15 +85,12 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
     /// </summary>
     private void Ended(JamFollower follower)
     {
-        if (!_followers.TryRemove(new KeyValuePair<Guid, JamFollower>(follower.UserId, follower))) return;
+        if (Detach(follower.UserId, publishInactive: true, only: follower) is null) return;
         _log.LogInformation("Jam : fin du suivi pour le compte {User}", follower.UserId);
-        Publish(follower.UserId, JamStateDto.Inactive);
-        _states.TryRemove(follower.UserId, out _);
         // Pas d'attente ici : on est dans la boucle du suivi, qui se termine juste après.
         _ = follower.DisposeAsync().AsTask();
     }
 
-    /// <summary>Arrête de suivre : l'état redevient inactif pour tous les appareils du compte.</summary>
     /// <summary>Commande au lecteur de l'hôte du Jam suivi par ce compte ; NotReady s'il n'en suit aucun.</summary>
     public Task<JamCommandResult> SendAsync(Guid userId, System.Text.Json.Nodes.JsonObject command, CancellationToken ct) =>
         _followers.TryGetValue(userId, out var follower) ? follower.SendAsync(command, ct) : Task.FromResult(JamCommandResult.NotReady);
@@ -85,15 +98,15 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
     public Task<JamCommandResult> QueueAsync(Guid userId, JamTrackDto track, bool playNow, CancellationToken ct) =>
         _followers.TryGetValue(userId, out var follower) ? follower.QueueAsync(track, playNow, ct) : Task.FromResult(JamCommandResult.NotReady);
 
+    /// <summary>Arrête de suivre : l'état redevient inactif pour tous les appareils du compte.</summary>
     public async Task LeaveAsync(Guid userId)
     {
         var gate = Gate(userId);
         await gate.WaitAsync();
         try
         {
-            await StopAsync(userId);
-            Publish(userId, JamStateDto.Inactive);
-            _states.TryRemove(userId, out _);
+            if (Detach(userId, publishInactive: true) is { } follower) await follower.DisposeAsync();
+            else PublishInactiveIfIdle(userId);
         }
         finally
         {
@@ -101,8 +114,39 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
         }
     }
 
+    /// <summary>
+    /// Retire le suivi du compte (s'il est <paramref name="only"/>, quand il est donné) et oublie son dernier état ; avec
+    /// <paramref name="publishInactive"/>, les appareils reçoivent l'état inactif dans le même verrou : aucun état
+    /// publié ensuite par ce suivi ne passe plus (il n'est plus celui du compte). Rend le suivi retiré, à arrêter.
+    /// </summary>
+    private JamFollower? Detach(Guid userId, bool publishInactive, JamFollower? only = null)
+    {
+        lock (_lock)
+        {
+            JamFollower? removed;
+            if (only is null) { if (!_followers.TryRemove(userId, out removed)) removed = null; }
+            else removed = _followers.TryRemove(new KeyValuePair<Guid, JamFollower>(userId, only)) ? only : null;
+            if (removed is null) return null;
+            _states.TryRemove(userId, out _);
+            if (publishInactive) Publish(userId, JamStateDto.Inactive);
+            return removed;
+        }
+    }
+
+    /// <summary>Aucun suivi pour ce compte : l'état inactif est poussé (et un dernier état périmé oublié).</summary>
+    private void PublishInactiveIfIdle(Guid userId)
+    {
+        lock (_lock)
+        {
+            if (_followers.ContainsKey(userId)) return;
+            Publish(userId, JamStateDto.Inactive);
+            _states.TryRemove(userId, out _);
+        }
+    }
+
     /// <summary>Un seul « join » ou « leave » à la fois par compte : deux appareils qui rejoignent ensemble ne doivent
-    /// pas laisser un suivi orphelin (toujours connecté à Spotify, jamais arrêté).</summary>
+    /// pas laisser un suivi orphelin (toujours connecté à Spotify, jamais arrêté). Une entrée par compte qui a suivi un
+    /// Jam depuis le démarrage, jamais retirée : la retirer sans risque demanderait de savoir que personne n'attend.</summary>
     private SemaphoreSlim Gate(Guid userId) => _gates.GetOrAdd(userId, _ => new SemaphoreSlim(1, 1));
 
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _gates = new();
@@ -115,37 +159,47 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
     {
         var channel = Channel.CreateBounded<string>(new BoundedChannelOptions(16) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
         var id = Guid.NewGuid();
-        var devices = _subscribers.GetOrAdd(userId, _ => new());
-        devices[id] = channel;
-        // État recalculé maintenant (pas le dernier publié) : son AsOfUnixMs sert à l'appareil d'horloge de référence.
-        channel.Writer.TryWrite(Serialize(_followers.ContainsKey(userId) ? Current(userId) : _states.GetValueOrDefault(userId, JamStateDto.Inactive)));
+        lock (_lock)
+        {
+            _subscribers.GetOrAdd(userId, _ => new())[id] = channel;
+            // État recalculé maintenant (pas le dernier publié) : son AsOfUnixMs sert à l'appareil d'horloge de référence.
+            // Dans le verrou : aucune publication ne peut s'intercaler et arriver avant cet état plus ancien.
+            channel.Writer.TryWrite(Serialize(_followers.TryGetValue(userId, out var f) ? f.Current() : _states.GetValueOrDefault(userId, JamStateDto.Inactive)));
+        }
         return (channel.Reader, new Lease(() =>
         {
-            if (_subscribers.TryGetValue(userId, out var d)) d.TryRemove(id, out _);
+            lock (_lock)
+            {
+                // Dernier appareil parti : l'entrée du compte est retirée (tout ajout passe aussi par ce verrou).
+                if (_subscribers.TryGetValue(userId, out var d) && d.TryRemove(id, out _) && d.IsEmpty) _subscribers.TryRemove(userId, out _);
+            }
             channel.Writer.TryComplete();
         }));
     }
 
     /// <summary>
     /// État publié par un suivi : seulement s'il est toujours celui du compte. Ses préparations en cours peuvent finir
-    /// après son arrêt (ou son remplacement par un nouveau « join ») et ne doivent pas ranimer un Jam terminé.
+    /// après son arrêt (ou son remplacement par un nouveau « join ») et ne doivent pas ranimer un Jam terminé. L'état est
+    /// calculé dans le verrou : deux publications concurrentes partent dans l'ordre de leur calcul.
     /// </summary>
-    private void PublishFrom(JamFollower? follower, Guid userId, JamStateDto state)
+    private void PublishFrom(JamFollower? follower, Guid userId, Func<JamStateDto> build)
     {
-        if (follower is not null && _followers.TryGetValue(userId, out var current) && ReferenceEquals(current, follower)) Publish(userId, state);
+        lock (_lock)
+        {
+            if (follower is not null && _followers.TryGetValue(userId, out var current) && ReferenceEquals(current, follower)) Publish(userId, build());
+        }
     }
 
-    private void Publish(Guid userId, JamStateDto state)
+    /// <summary>Enregistre et pousse un état ; appelé dans <see cref="_lock"/> (internal pour les tests).</summary>
+    internal void Publish(Guid userId, JamStateDto state)
     {
-        _states[userId] = state;
-        if (!_subscribers.TryGetValue(userId, out var devices)) return;
-        var json = Serialize(state);
-        foreach (var channel in devices.Values) channel.Writer.TryWrite(json);
-    }
-
-    private async Task StopAsync(Guid userId)
-    {
-        if (_followers.TryRemove(userId, out var follower)) await follower.DisposeAsync();
+        lock (_lock)
+        {
+            _states[userId] = state;
+            if (!_subscribers.TryGetValue(userId, out var devices)) return;
+            var json = Serialize(state);
+            foreach (var channel in devices.Values) channel.Writer.TryWrite(json);
+        }
     }
 
     /// <summary>
@@ -157,8 +211,8 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var follower in _followers.Values) await follower.DisposeAsync();
-        _followers.Clear();
+        foreach (var userId in _followers.Keys)
+            if (Detach(userId, publishInactive: false) is { } follower) await follower.DisposeAsync();
     }
 
     private sealed class Lease(Action dispose) : IDisposable

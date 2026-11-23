@@ -564,6 +564,40 @@ public sealed class JamApiTests(SonNuageFactory factory) : IClassFixture<SonNuag
     }
 
     [Fact]
+    public async Task A_refused_join_leaves_every_device_inactive()
+    {
+        // Le dernier état d'un suivi précédent ne doit pas survivre à un nouveau « join » refusé : un appareil qui
+        // s'abonne ensuite le croirait encore actif.
+        var hub = factory.Services.GetRequiredService<JamHub>();
+        var userId = Guid.NewGuid(); // aucun compte : pas de jeton, le suivi s'arrête aussitôt
+        hub.Publish(userId, JamStateDto.Inactive with { Active = true, HostName = "Ancien hôte" });
+        var (watching, lease) = hub.Subscribe(userId);
+        using (lease)
+        {
+            Assert.False(await hub.JoinAsync(userId, "3t2Yn4EKMk4APNPw22vlZg", JamAudio.Guest, mayImport: false, Ct));
+
+            var (late, lateLease) = hub.Subscribe(userId);
+            using (lateLease)
+                Assert.False(System.Text.Json.JsonSerializer.Deserialize<JamStateDto>(await late.ReadAsync(Ct), JsonWeb)!.Active);
+            string? last = null;
+            while (watching.TryRead(out var json)) last = json;
+            Assert.False(System.Text.Json.JsonSerializer.Deserialize<JamStateDto>(last!, JsonWeb)!.Active);
+        }
+    }
+
+    private static readonly System.Text.Json.JsonSerializerOptions JsonWeb = new(System.Text.Json.JsonSerializerDefaults.Web);
+
+    [Fact]
+    public void A_gzip_bomb_from_the_dealer_is_not_inflated()
+    {
+        using var packed = new MemoryStream();
+        using (var gz = new System.IO.Compression.GZipStream(packed, System.IO.Compression.CompressionLevel.SmallestSize, leaveOpen: true))
+            gz.Write(new byte[16 * 1024 * 1024]);
+        Assert.Throws<InvalidDataException>(() => JamFollower.Gunzip(packed.ToArray()));
+        Assert.Equal("abc"u8.ToArray(), JamFollower.Gunzip("abc"u8.ToArray()));
+    }
+
+    [Fact]
     public async Task An_unknown_listening_mode_is_refused()
     {
         var client = await UserAsync("jam-mode");

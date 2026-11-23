@@ -20,6 +20,9 @@ public sealed class JamFollower : IAsyncDisposable
     private static readonly TimeSpan Keepalive = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ImportPoll = TimeSpan.FromSeconds(5);
 
+    /// <summary>Taille maximale d'une trame dealer, et de son contenu décompressé : un cluster pèse quelques dizaines de Ko.</summary>
+    private const int MaxFrameBytes = 4 * 1024 * 1024;
+
     private readonly Guid _userId;
     private readonly string _joinToken;
     private readonly JamAudio _audio;
@@ -29,7 +32,8 @@ public sealed class JamFollower : IAsyncDisposable
     private int _imports;
     private const int MaxImports = 30;
     private readonly IServiceScopeFactory _scopes;
-    private readonly Action<Guid, JamStateDto> _publish;
+    /// <summary>Publie l'état : le hub appelle le calcul dans son verrou, pour que les états partent dans l'ordre.</summary>
+    private readonly Action<Func<JamStateDto>> _publish;
     private readonly Action<JamFollower> _ended;
     private readonly TaskCompletionSource<bool> _joined = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ILogger _log;
@@ -37,16 +41,19 @@ public sealed class JamFollower : IAsyncDisposable
     private readonly string _deviceId = Guid.NewGuid().ToString("N");
     private readonly Task _loop;
 
-    private ClusterState? _lastCluster;
     /// <summary>
-    /// Notre horloge moins celle de Spotify, estimée comme NTP : à chaque état reçu, (réception − server_timestamp_ms)
-    /// vaut décalage + temps de vol ; le minimum observé est la meilleure estimation (le vol le plus court).
+    /// Ce qu'on sait de l'hôte, remplacé d'un bloc à chaque état reçu (une seule référence, lue sans verrou depuis les
+    /// préparations et les commandes : jamais un titre avec la file d'un autre).
     /// </summary>
-    private long? _spotifyClockOffsetMs;
-    private string? _lastTrackId;
-    private string? _hostName;
+    /// <param name="ClockOffsetMs">Notre horloge moins celle de Spotify, estimée comme NTP : à chaque état reçu,
+    /// (réception − server_timestamp_ms) vaut décalage + temps de vol ; le minimum observé est la meilleure estimation
+    /// (le vol le plus court).</param>
+    private sealed record HostView(ClusterState? Cluster, string? TrackId, IReadOnlyList<string> Next, long? ClockOffsetMs);
 
-    public JamFollower(Guid userId, string joinToken, JamAudio audio, bool mayImport, IServiceScopeFactory scopes, Action<Guid, JamStateDto> publish,
+    private volatile HostView _host = new(null, null, [], null);
+    private volatile string? _hostName;
+
+    public JamFollower(Guid userId, string joinToken, JamAudio audio, bool mayImport, IServiceScopeFactory scopes, Action<Func<JamStateDto>> publish,
         Action<JamFollower> ended, ILogger log)
     {
         _userId = userId;
@@ -85,6 +92,7 @@ public sealed class JamFollower : IAsyncDisposable
             while (!ct.IsCancellationRequested)
             {
                 Outcome outcome;
+                _connectedAtMs = 0;
                 try
                 {
                     outcome = await FollowOnceAsync(ct);
@@ -96,7 +104,10 @@ public sealed class JamFollower : IAsyncDisposable
                     outcome = Outcome.Dropped;
                 }
                 if (outcome == Outcome.Over || ct.IsCancellationRequested) break;
-                failures = _connected ? 0 : failures + 1;
+                // Une connexion qui a tenu remet le compte à zéro ; une qui rejoint puis tombe aussitôt (dealer qui
+                // ferme à chaque fois) compte comme un échec, sinon on se reconnecterait chaque seconde sans fin.
+                var lived = _connectedAtMs != 0 && Environment.TickCount64 - _connectedAtMs >= StableConnection.TotalMilliseconds;
+                failures = lived ? 0 : failures + 1;
                 _connected = false;
                 if (failures >= Reconnects.Length) { _log.LogWarning("Jam : abandon après {Count} connexions ratées", failures); break; }
                 await Task.Delay(Reconnects[failures], ct);
@@ -116,11 +127,23 @@ public sealed class JamFollower : IAsyncDisposable
     /// <summary>Pauses avant de se reconnecter, selon le nombre d'échecs d'affilée (au-delà : abandon).</summary>
     private static readonly TimeSpan[] Reconnects = [TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30)];
 
-    /// <summary>Vrai dès qu'une connexion a rejoint le Jam : remet le compte des échecs à zéro.</summary>
-    private bool _connected;
+    /// <summary>Durée à partir de laquelle une connexion a « tenu » et remet le compte des échecs à zéro.</summary>
+    private static readonly TimeSpan StableConnection = TimeSpan.FromSeconds(60);
 
-    /// <summary>Session rejointe (et où la quitter) : à quitter côté Spotify quand on arrête de suivre.</summary>
-    private (SpotifyHosts Hosts, string Id)? _session;
+    /// <summary>Vrai dès qu'une connexion a rejoint le Jam (les commandes sont alors possibles).</summary>
+    private volatile bool _connected;
+
+    /// <summary>Moment (TickCount64) où la connexion en cours a rejoint le Jam ; 0 si elle ne l'a pas fait.</summary>
+    private long _connectedAtMs;
+
+    /// <summary>
+    /// Session rejointe : hôtes spclient (pour les commandes) et identifiant (pour la quitter). L'identifiant peut
+    /// manquer si les infos de session n'ont pas répondu : le « join » et les commandes n'en ont pas besoin, il est
+    /// redemandé au moment de quitter. Une seule référence, jamais lue à moitié.
+    /// </summary>
+    private sealed record JoinedSession(SpotifyHosts Hosts, string? Id);
+
+    private volatile JoinedSession? _session;
 
     /// <summary>Une raison de fin est arrivée (Jam supprimé, exclu…) : la connexion en cours est la dernière.</summary>
     private volatile bool _over;
@@ -141,7 +164,9 @@ public sealed class JamFollower : IAsyncDisposable
             if (hosts is null) { _log.LogWarning("Jam : hôtes Spotify introuvables"); return Outcome.Dropped; }
             info = await client.SessionInfoAsync(hosts, accessToken, _joinToken, ct);
             _hostName = info?.HostName ?? _hostName;
-            if (info is not null) _session = (hosts, info.SessionId);
+            // Infos absentes : on rejoint quand même (le refus éventuel vient du « join »), les commandes n'ont besoin
+            // que des hôtes. Avant, la session restait vide et les commandes « pas prêt » pendant tout le Jam.
+            _session = new JoinedSession(hosts, info?.SessionId ?? _session?.Id);
         }
 
         using var ws = new ClientWebSocket();
@@ -162,13 +187,17 @@ public sealed class JamFollower : IAsyncDisposable
             }
             _joined.TrySetResult(true);
             _connected = true;
+            _connectedAtMs = Environment.TickCount64;
             if (await client.RegisterReceiverAsync(hosts, accessToken, _deviceId, connectionId, ct) is { } initial)
-                await ProcessAsync(initial, ct);
+                Process(initial, ct);
         }
 
         await PumpAsync(ws, ct);
         return _over ? Outcome.Over : Outcome.Dropped;
     }
+
+    /// <summary>Dernière trame reçue du dealer (TickCount64) : le keepalive coupe une connexion devenue muette.</summary>
+    private long _lastFrameAtMs;
 
     /// <summary>Lit le flux dealer : traite « message » (cluster) et « request » (commandes, auxquelles on répond), avec keepalive.</summary>
     private async Task PumpAsync(ClientWebSocket ws, CancellationToken ct)
@@ -177,35 +206,30 @@ public sealed class JamFollower : IAsyncDisposable
         using var pumpCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var send = new SemaphoreSlim(1, 1);
         _sendLock = send;
-        var keepalive = Task.Run(async () =>
-        {
-            try
-            {
-                while (!pumpCts.IsCancellationRequested && ws.State == WebSocketState.Open)
-                {
-                    await Task.Delay(Keepalive, pumpCts.Token);
-                    await SendAsync(ws, "{\"type\":\"ping\"}", pumpCts.Token);
-                }
-            }
-            catch (Exception) { }
-        });
+        Interlocked.Exchange(ref _lastFrameAtMs, Environment.TickCount64);
+        var keepalive = Task.Run(() => KeepaliveAsync(ws, pumpCts.Token));
         var buffer = new ArraySegment<byte>(new byte[64 * 1024]);
         try
         {
             while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
             {
                 using var ms = new MemoryStream();
+                var tooBig = false;
                 WebSocketReceiveResult result;
                 do
                 {
                     result = await ws.ReceiveAsync(buffer, ct);
+                    Interlocked.Exchange(ref _lastFrameAtMs, Environment.TickCount64);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
                         _log.LogInformation("Jam : dealer fermé ({Status})", result.CloseStatus);
                         return;
                     }
-                    ms.Write(buffer.Array!, 0, result.Count);
+                    // Trame démesurée : lue jusqu'au bout pour rester calé sur le flux, mais pas gardée en mémoire.
+                    if (!tooBig && ms.Length + result.Count > MaxFrameBytes) { tooBig = true; ms.SetLength(0); }
+                    if (!tooBig) ms.Write(buffer.Array!, 0, result.Count);
                 } while (!result.EndOfMessage);
+                if (tooBig) { _log.LogWarning("Jam : trame dealer de plus de {Max} octets ignorée", MaxFrameBytes); continue; }
                 await HandleFrameAsync(ws, ms.ToArray(), ct);
             }
             _log.LogInformation("Jam : dealer terminé (état {State})", ws.State);
@@ -214,10 +238,51 @@ public sealed class JamFollower : IAsyncDisposable
         {
             pumpCts.Cancel();
             await keepalive;
+            // Plus personne n'envoie sur cette connexion (le keepalive est fini, les réponses partent de cette boucle).
+            _sendLock = null;
+            send.Dispose();
         }
     }
 
-    private SemaphoreSlim? _sendLock;
+    /// <summary>
+    /// Ping toutes les 30 s, et vérifie que le dealer vit : rien reçu (pas même le pong) depuis deux périodes, ou ping
+    /// impossible à envoyer, et la connexion est coupée pour que la boucle se reconnecte. Sans cela, une connexion à
+    /// moitié morte laissait le suivi figé sans jamais se reconnecter.
+    /// </summary>
+    private async Task KeepaliveAsync(ClientWebSocket ws, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
+            {
+                await Task.Delay(Keepalive, ct);
+                var silentMs = Environment.TickCount64 - Interlocked.Read(ref _lastFrameAtMs);
+                if (silentMs > 2 * Keepalive.TotalMilliseconds)
+                {
+                    _log.LogWarning("Jam : dealer muet depuis {Seconds} s, reconnexion", silentMs / 1000);
+                    ws.Abort();
+                    return;
+                }
+                try
+                {
+                    await SendAsync(ws, Ping, ct);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    _log.LogWarning("Jam : ping du dealer impossible ({Error}), reconnexion", ex.Message);
+                    ws.Abort();
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+    }
+
+    private const string Ping = "{\"type\":\"ping\"}";
+
+    private volatile SemaphoreSlim? _sendLock;
 
     private async Task SendAsync(ClientWebSocket ws, string text, CancellationToken ct)
     {
@@ -227,22 +292,25 @@ public sealed class JamFollower : IAsyncDisposable
         finally { gate?.Release(); }
     }
 
-    /// <summary>Traite une trame dealer selon son type (voir go-librespot) : message (push), request (commande à acquitter), pong.</summary>
+    /// <summary>
+    /// Traite une trame dealer selon son type (voir go-librespot) : message (push), request (commande à acquitter), pong.
+    /// Une trame illisible (JSON, base64, gzip corrompu…) est journalisée et sautée : elle ne coupe pas la connexion.
+    /// </summary>
     private async Task HandleFrameAsync(ClientWebSocket ws, byte[] frame, CancellationToken ct)
     {
-        string? type = null, uri = null, key = null;
+        string? type = null, key = null;
         try
         {
             using var doc = JsonDocument.Parse(frame);
             var root = doc.RootElement;
             type = Str(root, "type");
-            uri = Str(root, "uri");
+            var uri = Str(root, "uri");
             key = Str(root, "key");
             if (type == "message" && uri is not null && DecodeMessagePayload(root) is { } payload)
             {
                 if (uri.StartsWith("hm://connect-state/v1/cluster", StringComparison.Ordinal))
                 {
-                    if (ClusterState.ParseClusterUpdate(payload) is { } cluster) await ProcessAsync(cluster, ct);
+                    if (ClusterState.ParseClusterUpdate(payload) is { } cluster) Process(cluster, ct);
                 }
                 else if (uri.StartsWith(SessionUpdate.Uri, StringComparison.Ordinal))
                 {
@@ -258,17 +326,23 @@ public sealed class JamFollower : IAsyncDisposable
                 }
             }
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
+            _log.LogInformation("Jam : trame dealer ignorée ({Error})", ex.Message);
             return;
         }
 
         // Les « request » (commandes de lecture visant cet appareil) doivent être acquittées, sinon le dealer peut cesser d'émettre.
         if (type == "request" && key is not null)
         {
-            var reply = $"{{\"type\":\"reply\",\"key\":\"{key}\",\"payload\":{{\"success\":true}}}}";
+            // Construite, pas interpolée : la clé vient du réseau.
+            var reply = new JsonObject { ["type"] = "reply", ["key"] = key, ["payload"] = new JsonObject { ["success"] = true } }.ToJsonString();
             try { await SendAsync(ws, reply, ct); }
-            catch (Exception) { }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // Connexion en train de tomber : le keepalive (ou la réception) s'en charge.
+                _log.LogDebug("Jam : réponse au dealer impossible ({Error})", ex.Message);
+            }
         }
     }
 
@@ -286,14 +360,20 @@ public sealed class JamFollower : IAsyncDisposable
         return Gunzip(bytes);
     }
 
-
-    private static byte[] Gunzip(byte[] data)
+    /// <summary>Décompresse si c'est du gzip, au plus <see cref="MaxFrameBytes"/> (une bombe gzip ne remplit pas la mémoire).</summary>
+    internal static byte[] Gunzip(byte[] data)
     {
         if (data.Length < 2 || data[0] != 0x1f || data[1] != 0x8b) return data;
         using var input = new MemoryStream(data);
         using var gz = new GZipStream(input, CompressionMode.Decompress);
         using var output = new MemoryStream();
-        gz.CopyTo(output);
+        var chunk = new byte[81920];
+        int n;
+        while ((n = gz.Read(chunk, 0, chunk.Length)) > 0)
+        {
+            if (output.Length + n > MaxFrameBytes) throw new InvalidDataException($"payload décompressé de plus de {MaxFrameBytes} octets");
+            output.Write(chunk, 0, n);
+        }
         return output.ToArray();
     }
 
@@ -309,12 +389,14 @@ public sealed class JamFollower : IAsyncDisposable
             do
             {
                 result = await ws.ReceiveAsync(buffer, timeout.Token);
+                if (ms.Length + result.Count > MaxFrameBytes) return null;
                 ms.Write(buffer.Array!, 0, result.Count);
             } while (!result.EndOfMessage);
             try
             {
                 using var doc = JsonDocument.Parse(ms.ToArray());
-                if (doc.RootElement.TryGetProperty("headers", out var h) && h.TryGetProperty("Spotify-Connection-Id", out var id))
+                if (doc.RootElement.TryGetProperty("headers", out var h) && h.ValueKind == JsonValueKind.Object
+                    && h.TryGetProperty("Spotify-Connection-Id", out var id) && id.ValueKind == JsonValueKind.String)
                     return id.GetString();
             }
             catch (JsonException)
@@ -325,30 +407,30 @@ public sealed class JamFollower : IAsyncDisposable
     }
 
     /// <summary>Traite un nouvel état de l'hôte : si le titre a changé, (re)résout ; sinon met à jour position/pause.</summary>
-    private async Task ProcessAsync(ClusterState cluster, CancellationToken ct)
+    private void Process(ClusterState cluster, CancellationToken ct)
     {
+        var previous = _host;
         // Arrêté, l'hôte peut ne plus annoncer d'appareil actif : on garde le dernier, cible de « reprendre ».
-        if (cluster.ActiveDeviceId is not { Length: > 0 } && _lastCluster?.ActiveDeviceId is { Length: > 0 } device)
+        if (cluster.ActiveDeviceId is not { Length: > 0 } && previous.Cluster?.ActiveDeviceId is { Length: > 0 } device)
             cluster = cluster with { ActiveDeviceId = device };
-        _lastCluster = cluster;
+        var offset = previous.ClockOffsetMs;
         if (cluster.ServerTimestampMs > 0)
         {
             var sample = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - cluster.ServerTimestampMs;
-            if (_spotifyClockOffsetMs is not { } best || sample < best) _spotifyClockOffsetMs = sample;
+            if (offset is not { } best || sample < best) offset = sample;
         }
-        var trackId = cluster.TrackId;
         // Pub, épisode, fichier local : pas un titre à suivre, le précédent n'est plus le titre en cours.
-        _lastTrackId = trackId;
+        var trackId = cluster.TrackId;
         // File de l'hôte : on prépare d'avance les prochains titres pour que le passage soit immédiat.
-        _nextTrackIds = (cluster.NextTrackUris ?? [])
+        var next = (cluster.NextTrackUris ?? [])
             .Select(u => u.StartsWith("spotify:track:", StringComparison.Ordinal) ? u["spotify:track:".Length..] : null)
             .OfType<string>().Where(id => id != trackId).Distinct().Take(PrefetchAhead).ToList();
+        _host = new HostView(cluster, trackId, next, offset);
         if (trackId is not null) Prepare(trackId, cluster.DurationMs / 1000.0, ct);
-        foreach (var next in _nextTrackIds) Prepare(next, 0, ct);
+        foreach (var n in next) Prepare(n, 0, ct);
         Publish();
     }
 
-    /// <summary>Résout le titre courant : bibliothèque d'abord, puis import YouTube en mode invité.</summary>
     /// <summary>Titres suivants préparés d'avance (métadonnées, bibliothèque, import YouTube) pour un démarrage immédiat.</summary>
     private const int PrefetchAhead = 2;
     private const int PrepCacheSize = 40;
@@ -357,9 +439,10 @@ public sealed class JamFollower : IAsyncDisposable
     /// <summary>Préparation d'un titre Spotify : où en est sa résolution en un titre jouable ici.</summary>
     private sealed class Prep
     {
-        public JamTrackDto? Meta;
-        public TrackDto? Resolved;
-        public JamResolve State = JamResolve.Pending;
+        public volatile JamTrackDto? Meta;
+        public volatile TrackDto? Resolved;
+        /// <summary>Écrit après <see cref="Resolved"/> : qui lit « Matched » trouve la piste.</summary>
+        public volatile JamResolve State = JamResolve.Pending;
         public long Order;
         /// <summary>Échec passager (délai, réseau, import abandonné) : à retenter après ce moment.</summary>
         public DateTimeOffset? RetryAfter;
@@ -380,8 +463,9 @@ public sealed class JamFollower : IAsyncDisposable
         var prep = new Prep { Order = Interlocked.Increment(ref _prepOrder) };
         if (!_preps.TryAdd(trackId, prep)) return _preps[trackId];
         // Le cache reste petit : on oublie les plus anciennes préparations (sauf celle en cours).
+        var current = _host.TrackId;
         if (_preps.Count > PrepCacheSize)
-            foreach (var old in _preps.Where(p => p.Key != _lastTrackId).OrderBy(p => p.Value.Order).Take(_preps.Count - PrepCacheSize).ToList())
+            foreach (var old in _preps.Where(p => p.Key != current).OrderBy(p => p.Value.Order).Take(_preps.Count - PrepCacheSize).ToList())
                 _preps.TryRemove(old.Key, out _);
         _ = Task.Run(() => RunPrepAsync(trackId, durationSeconds, prep, ct), ct);
         return prep;
@@ -400,7 +484,7 @@ public sealed class JamFollower : IAsyncDisposable
                 // Durée : celle du cluster si connue (celle que joue l'hôte).
                 prep.Meta = meta is null ? null : durationSeconds > 0 ? meta with { DurationSeconds = durationSeconds } : meta;
             }
-            if (prep.Meta is null) { Fail(trackId, prep, RetrySoon); return; }
+            if (prep.Meta is not { } wanted) { Fail(trackId, prep, RetrySoon); return; }
             Changed(trackId);
 
             string? videoId;
@@ -408,7 +492,7 @@ public sealed class JamFollower : IAsyncDisposable
             {
                 var db = scope.ServiceProvider.GetRequiredService<SonNuageDbContext>();
                 var resolver = scope.ServiceProvider.GetRequiredService<JamResolver>();
-                if (await resolver.FindInLibraryAsync(db, _userId, prep.Meta, ct) is { } inLibrary)
+                if (await resolver.FindInLibraryAsync(db, _userId, wanted, ct) is { } inLibrary)
                 {
                     SetPrep(trackId, prep, JamResolve.Matched, inLibrary);
                     return;
@@ -421,7 +505,7 @@ public sealed class JamFollower : IAsyncDisposable
                     return;
                 }
                 // Refus du quota (ou du rôle, relu en base) : null, retenté plus tard comme un import raté.
-                videoId = await resolver.StartImportAsync(db, _userId, prep.Meta, ct);
+                videoId = await resolver.StartImportAsync(db, _userId, wanted, ct);
             }
             if (videoId is null) { Fail(trackId, prep, RetryLater); return; }
             SetPrep(trackId, prep, JamResolve.Importing, null);
@@ -463,18 +547,17 @@ public sealed class JamFollower : IAsyncDisposable
     private void SetPrep(string trackId, Prep prep, JamResolve state, TrackDto? resolved)
     {
         _log.LogDebug("Jam : titre {Track} → {State}", trackId, state);
-        prep.State = state;
         prep.Resolved = resolved;
+        prep.State = state;
         Changed(trackId);
     }
 
     /// <summary>Une préparation a avancé : republie si elle concerne le titre en cours ou un des suivants.</summary>
     private void Changed(string trackId)
     {
-        if (trackId == _lastTrackId || _nextTrackIds.Contains(trackId)) Publish();
+        var host = _host;
+        if (trackId == host.TrackId || host.Next.Contains(trackId)) Publish();
     }
-
-    private IReadOnlyList<string> _nextTrackIds = [];
 
     /// <summary>Un seul rafraîchissement à la fois : deux avec le même jeton de rafraîchissement, et Spotify refuse le
     /// second (ou en enregistre un déjà remplacé).</summary>
@@ -513,49 +596,68 @@ public sealed class JamFollower : IAsyncDisposable
 
         var refresh = tokens.Read(row.SpotifyRefreshToken);
         if (refresh is null) return access; // Pas de rafraîchissement : on tente le jeton existant.
+        // Null si refusé ou Spotify injoignable : on tente le jeton existant, le suivant réessaiera.
         var fresh = await client.RefreshAsync(refresh, ct);
         if (fresh is null) return access;
         await tokens.SaveAsync(db, _userId, fresh.AccessToken, fresh.RefreshToken ?? refresh, fresh.ExpiresAt, row.SpotifyDisplayName, ct);
         return fresh.AccessToken;
     }
 
-    private void Publish() => _publish(_userId, Build());
+    private void Publish() => _publish(Build);
 
     private JamStateDto Build()
     {
         var now = DateTimeOffset.UtcNow;
-        var current = _lastTrackId is { } id && _preps.TryGetValue(id, out var p) ? p : null;
-        var upcoming = _nextTrackIds
+        var host = _host;
+        var current = host.TrackId is { } id && _preps.TryGetValue(id, out var p) ? p : null;
+        var upcoming = host.Next
             .Select(n => _preps.TryGetValue(n, out var np) && np.State == JamResolve.Matched ? np.Resolved : null)
             .TakeWhile(t => t is not null).OfType<TrackDto>().ToList();
+        var state = current?.State ?? JamResolve.Pending;
         return new JamStateDto(
             Active: true,
             Service: Contracts.Jam.Spotify,
             Audio: _audio,
             HostName: _hostName,
-            Track: current?.Meta ?? (_lastCluster is { TrackId: not null } c ? new JamTrackDto(c.Title ?? "", "", null, c.DurationMs / 1000.0, null) : null),
-            IsPlaying: _lastCluster is { IsPaused: false },
-            PositionSeconds: _lastCluster?.PositionSecondsAt(now, _spotifyClockOffsetMs ?? 0) ?? 0,
+            Track: current?.Meta ?? (host.Cluster is { TrackId: not null } c ? new JamTrackDto(c.Title ?? "", "", null, c.DurationMs / 1000.0, null) : null),
+            IsPlaying: host.Cluster is { IsPaused: false },
+            PositionSeconds: host.Cluster?.PositionSecondsAt(now, host.ClockOffsetMs ?? 0) ?? 0,
             AsOfUnixMs: now.ToUnixTimeMilliseconds(),
-            Resolve: current?.State ?? JamResolve.Pending,
-            Resolved: current?.Resolved,
+            Resolve: state,
+            Resolved: state == JamResolve.Matched ? current?.Resolved : null,
             Upcoming: upcoming,
-            SourceTrackId: _lastTrackId);
+            SourceTrackId: host.TrackId);
     }
+
+    /// <summary>Arrêt en cours ou fini : le hub et la fin du suivi peuvent l'appeler tous deux, il n'a lieu qu'une fois.</summary>
+    private TaskCompletionSource? _disposal;
 
     public async ValueTask DisposeAsync()
     {
-        _cts.Cancel();
+        var mine = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (Interlocked.CompareExchange(ref _disposal, mine, null) is { } running)
+        {
+            await running.Task;
+            return;
+        }
         try
         {
-            await _loop;
+            _cts.Cancel();
+            try
+            {
+                await _loop;
+            }
+            catch (Exception)
+            {
+                // Déjà journalisé.
+            }
+            _cts.Dispose();
+            if (!_over) await LeaveSessionAsync();
         }
-        catch (Exception)
+        finally
         {
-            // Déjà journalisé.
+            mine.TrySetResult();
         }
-        _cts.Dispose();
-        if (!_over) await LeaveSessionAsync();
     }
 
     /// <summary>
@@ -564,7 +666,7 @@ public sealed class JamFollower : IAsyncDisposable
     /// </summary>
     public async Task<JamCommandResult> SendAsync(JsonObject command, CancellationToken ct)
     {
-        if (!_connected || _session is not { } session || _lastCluster?.ActiveDeviceId is not { Length: > 0 } host) return JamCommandResult.NotReady;
+        if (!_connected || _session is not { } session || _host.Cluster?.ActiveDeviceId is not { Length: > 0 } host) return JamCommandResult.NotReady;
         var accessToken = await FreshAccessTokenAsync(ct);
         if (accessToken is null) return JamCommandResult.NotReady;
         using var scope = _scopes.CreateScope();
@@ -579,7 +681,7 @@ public sealed class JamFollower : IAsyncDisposable
     /// </summary>
     public async Task<JamCommandResult> QueueAsync(JamTrackDto track, bool playNow, CancellationToken ct)
     {
-        if (!_connected || _session is not { } session) return JamCommandResult.NotReady;
+        if (!_connected || _session is null) return JamCommandResult.NotReady;
         var accessToken = await FreshAccessTokenAsync(ct);
         if (accessToken is null) return JamCommandResult.NotReady;
         IReadOnlyList<SpotifySearchHit> hits;
@@ -604,7 +706,11 @@ public sealed class JamFollower : IAsyncDisposable
             var accessToken = await FreshAccessTokenAsync(timeout.Token);
             if (accessToken is null) return;
             using var scope = _scopes.CreateScope();
-            await scope.ServiceProvider.GetRequiredService<SpotifyClient>().LeaveAsync(session.Hosts, accessToken, session.Id, timeout.Token);
+            var client = scope.ServiceProvider.GetRequiredService<SpotifyClient>();
+            // Identifiant inconnu (infos de session sans réponse au « join ») : redemandé maintenant.
+            var id = session.Id ?? (await client.SessionInfoAsync(session.Hosts, accessToken, _joinToken, timeout.Token))?.SessionId;
+            if (id is null) { _log.LogInformation("Jam : session à quitter introuvable côté Spotify"); return; }
+            await client.LeaveAsync(session.Hosts, accessToken, id, timeout.Token);
         }
         catch (Exception ex)
         {
@@ -625,4 +731,3 @@ public enum JamCommandResult
     /// <summary>Le titre de SonNuage n'a pas d'équivalent sûr sur Spotify.</summary>
     NotOnSpotify,
 }
-
