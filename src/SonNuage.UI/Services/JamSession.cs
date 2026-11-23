@@ -85,7 +85,8 @@ public sealed class JamSession : IDisposable, IPlayerRoute
 
     private void OnPlayerState()
     {
-        var st = _player.State;
+        // Le vrai lecteur local, pas ce que la route affiche à sa place (l'hôte, en mode « hôte seulement »).
+        var st = PlayerRouting.Bypass(() => _player.State);
         _playerPos = st.PositionSeconds;
         _playerPosAtMs = NowMs;
         _playerRunning = st.IsPlaying && !st.IsBuffering;
@@ -215,14 +216,14 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             _lookupSource = null;
             _lookup = null;
         }
-        _ = _youtube.WarmUpAsync();
+        _ = Quietly(_youtube.WarmUpAsync);
         _ = FollowAsync(cts.Token);
         _ = SyncLoopAsync(cts.Token);
     }
 
     private void StopFollow()
     {
-        if (Math.Abs(_speed - 1) > 0.001) { _speed = 1; _ = _player.SetSpeedAsync(1); }
+        if (Math.Abs(_speed - 1) > 0.001) { _speed = 1; _ = Quietly(() => _player.SetSpeedAsync(1)); }
         _follow?.Cancel();
         _follow = null;
         _held = false;
@@ -296,9 +297,24 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             Wake();
         }
         // Le son sort chez l'hôte : ce qui jouait ici s'arrête (sinon on entendrait les deux).
-        if (state is { Active: true, Audio: JamAudio.RemoteOnly } && !wasHostOnly) _ = PauseLocalAsync();
+        if (state is { Active: true, Audio: JamAudio.RemoteOnly } && !wasHostOnly) _ = Quietly(PauseLocalAsync);
         StateChanged?.Invoke();
         ShownChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Commande lancée sans l'attendre : une erreur (lecteur en cours de fermeture, JS indisponible, réseau) est
+    /// absorbée ici plutôt que de finir en exception non observée. La synchro rattrapera au tour suivant.
+    /// </summary>
+    private static async Task Quietly(Func<Task> start)
+    {
+        try
+        {
+            await start();
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private void Wake()
@@ -647,8 +663,27 @@ public sealed class JamSession : IDisposable, IPlayerRoute
     /// </summary>
     public bool Routes => State is { Active: true };
 
-    /// <summary>Hôte seulement : ce que joue l'hôte, à afficher à la place du lecteur local (qui ne joue rien).</summary>
-    public PlayerState? Shown => State is { Active: true, Audio: JamAudio.RemoteOnly } state ? HostView(state, HostPosition(state)) : null;
+    /// <summary>
+    /// Hôte seulement : ce que joue l'hôte, à afficher à la place du lecteur local (qui ne joue rien). Le volume reste
+    /// celui du lecteur local (c'est lui que le curseur règle). Lu à chaque rendu : la vue n'est reconstruite (file
+    /// comprise) qu'à chaque nouvel état du Jam, seules la position et le volume changent entre deux.
+    /// </summary>
+    public PlayerState? Shown
+    {
+        get
+        {
+            if (State is not { Active: true, Audio: JamAudio.RemoteOnly } state) return null;
+            var cache = _shown;
+            if (cache is null || !ReferenceEquals(cache.For, state)) _shown = cache = new ShownView(state, HostView(state, 0));
+            var volume = PlayerRouting.Bypass(() => _player.State.Volume);
+            return cache.View.Current is null
+                ? cache.View with { Volume = volume }
+                : cache.View with { PositionSeconds = HostPosition(state), Volume = volume };
+        }
+    }
+
+    private sealed record ShownView(JamStateDto For, PlayerState View);
+    private ShownView? _shown;
 
     public event Action? ShownChanged;
 

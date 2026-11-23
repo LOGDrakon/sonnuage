@@ -169,6 +169,22 @@ public sealed class JamSessionTests
         Assert.Equal(JamControl.Pause, sent?.Action);
     }
 
+    [Fact]
+    public async Task In_host_only_mode_the_volume_shown_is_the_local_one()
+    {
+        var local = new FakePlayer();
+        var player = new LinkedPlayer(local, local, new SoloLink());
+        await player.RestoreAsync();
+        await player.SetVolumeAsync(0.4);
+        using var jam = await SessionAsync(new FakeJamServer(Playing(JamAudio.RemoteOnly)), player);
+
+        await jam.JoinAsync("https://spotify.link/x", JamAudio.RemoteOnly);
+
+        Assert.Equal("Host song", player.State.Current?.Title);
+        Assert.Equal(0.4, player.State.Volume);
+        Assert.Same(player.State.Queue, player.State.Queue);
+    }
+
     // ---- Faux serveur ----
 
     private static JamStateDto Playing(JamAudio audio, TrackDto? resolved = null, double position = 30) => new(

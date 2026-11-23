@@ -178,6 +178,21 @@ public static class PlayerRouting
         await commands();
     }
 
+    /// <summary>Lit l'état du vrai lecteur local (pas ce que la route affiche à sa place).</summary>
+    public static T Bypass<T>(Func<T> read)
+    {
+        var was = Bypassed.Value;
+        Bypassed.Value = true;
+        try
+        {
+            return read();
+        }
+        finally
+        {
+            Bypassed.Value = was;
+        }
+    }
+
     /// <summary>La route à suivre pour une commande de l'utilisateur, ou null pour le lecteur local.</summary>
     public static IPlayerRoute? For(IPlayerRoute? route) => route is { Routes: true } && !Bypassed.Value ? route : null;
 }
