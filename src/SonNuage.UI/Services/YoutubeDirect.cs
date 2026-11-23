@@ -33,18 +33,26 @@ public sealed class YoutubeDirect
     [UnsupportedOSPlatformGuard("browser")]
     public static bool Supported => !OperatingSystem.IsBrowser();
 
-    private readonly HttpClient _http = Supported
-        ? new(new SocketsHttpHandler
-        {
-            AutomaticDecompression = DecompressionMethods.All,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-            EnableMultipleHttp2Connections = true,
-        })
-        {
-            Timeout = TimeSpan.FromSeconds(8),
-            DefaultRequestVersion = HttpVersion.Version20,
-        }
-        : new();
+    private readonly HttpClient _http;
+
+    public YoutubeDirect()
+    {
+        _http = Supported
+            ? new(new SocketsHttpHandler
+            {
+                AutomaticDecompression = DecompressionMethods.All,
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+                EnableMultipleHttp2Connections = true,
+            })
+            {
+                Timeout = TimeSpan.FromSeconds(8),
+                DefaultRequestVersion = HttpVersion.Version20,
+            }
+            : new();
+    }
+
+    /// <summary>Pour les tests : YouTube remplacé par un faux serveur (l'injection de dépendances garde l'autre constructeur).</summary>
+    public YoutubeDirect(HttpMessageHandler handler) => _http = new(handler) { Timeout = TimeSpan.FromSeconds(8) };
 
     private readonly SemaphoreSlim _visitorLock = new(1, 1);
     private string? _visitor;

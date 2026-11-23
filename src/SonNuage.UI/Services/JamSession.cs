@@ -223,9 +223,15 @@ public sealed class JamSession : IDisposable, IPlayerRoute
                 Apply(JamStateDto.Inactive);
                 return;
             }
-            catch (Exception ex) when (ex is ApiException or HttpRequestException or IOException or OperationCanceledException or JsonException)
+            catch (Exception) when (!ct.IsCancellationRequested)
             {
-                if (ct.IsCancellationRequested) return;
+                // Tout le reste (réseau, flux muet 45 s → TimeoutException, abonné de StateChanged en erreur…) : on
+                // rouvre le flux après une pause, plutôt que de laisser le suivi mourir sans bruit sur un état figé.
+            }
+            catch (Exception)
+            {
+                // Suivi arrêté (quitter, nouveau Jam) : l'annulation sort parfois en erreur d'entrée-sortie.
+                return;
             }
             try
             {
