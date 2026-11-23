@@ -110,6 +110,57 @@ public sealed class JamMatchTests
         Assert.True(JamMatch.Evaluate(host, Audio("EARFQUAKE", "Tyler, The Creator", 190)).Accepted);
     }
 
+    [Theory]
+    [InlineData("September", "Earth, Wind & Fire", "Arcade Fire")]
+    [InlineData("Dog Days Are Over", "Florence + The Machine", "Machine Head")]
+    [InlineData("EARFQUAKE", "Tyler, The Creator", "Creator")]
+    public void A_short_piece_of_a_band_name_is_not_that_band(string title, string host, string candidate)
+    {
+        // « Fire » n'est pas « Earth, Wind & Fire » ; « The Machine » ni « The Creator » ne sont des artistes à part.
+        Assert.False(JamMatch.Evaluate(Host(title, host, 215), Audio(title, candidate, 215)).Accepted);
+    }
+
+    [Fact]
+    public void Joined_artists_are_still_found_after_a_comma_name()
+    {
+        // Spotify joint les artistes par des virgules : « Tyler, The Creator » reste un nom, l'invité aussi.
+        var host = Host("See You Again (feat. Kali Uchis)", "Tyler, The Creator, Kali Uchis", 180);
+        Assert.True(JamMatch.Evaluate(host, Audio("See You Again", "Tyler, The Creator", 180)).Accepted);
+        Assert.True(JamMatch.Evaluate(host, Audio("See You Again", "Kali Uchis", 180)).Accepted);
+    }
+
+    [Theory]
+    [InlineData("Song", "Song, Pt. 2")]
+    [InlineData("Song", "Song Part II")]
+    [InlineData("Song", "Song II")]
+    [InlineData("Song, Pt. 1", "Song, Pt. 2")]
+    [InlineData("Song Part 2", "Song")]
+    public void Another_part_of_a_song_is_not_the_same_track(string host, string candidate)
+    {
+        Assert.False(JamMatch.SameVersion(host, candidate));
+        Assert.False(JamMatch.Evaluate(Host(host, "Artist", 200), Audio(candidate, "Artist", 200)).Accepted);
+    }
+
+    [Theory]
+    [InlineData("Song, Pt. 2", "Song Part 2")]
+    [InlineData("Song Part II", "Song, Pt. 2")]
+    [InlineData("Song II", "Song Pt. 2")]
+    public void The_same_part_written_differently_matches(string host, string candidate) =>
+        Assert.True(JamMatch.Evaluate(Host(host, "Artist", 200), Audio(candidate, "Artist", 200)).Accepted);
+
+    [Theory]
+    [InlineData("Creep (Live at Wembley)", "Creep (Live in Paris)")]
+    [InlineData("All Too Well (Taylor's Version)", "All Too Well")]
+    [InlineData("All Too Well", "All Too Well (Re-Recorded)")]
+    public void Another_concert_or_a_rerecording_is_not_the_same_track(string host, string candidate) =>
+        Assert.False(JamMatch.SameVersion(host, candidate));
+
+    [Theory]
+    [InlineData("Creep (Live at Wembley)", "Creep - Live at Wembley Stadium")]
+    [InlineData("All Too Well (Taylor's Version)", "All Too Well (Taylor’s Version) [Lyrics]")]
+    public void The_same_concert_or_rerecording_matches(string host, string candidate) =>
+        Assert.True(JamMatch.SameVersion(host, candidate));
+
     [Fact]
     public void A_better_candidate_scores_higher()
     {
