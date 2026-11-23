@@ -80,9 +80,20 @@ public sealed class YoutubeDirect
     public async Task<YoutubeAudio?> FindAsync(JamTrackDto host, CancellationToken ct = default)
     {
         if (!Supported) return null;
+        string? videoId = null;
+        if (host.Isrc is { Length: > 0 } isrc)
+        {
+            try
+            {
+                videoId = await SearchAsync(isrc, host, ct);
+            }
+            catch (Exception ex) when (IsTransient(ex) && !ct.IsCancellationRequested)
+            {
+                // Recherche par ISRC en échec (erreur passagère, réponse inattendue) : l'artiste et le titre restent.
+            }
+        }
         try
         {
-            var videoId = host.Isrc is { Length: > 0 } isrc ? await SearchAsync(isrc, host, ct) : null;
             videoId ??= await SearchAsync($"{host.Artist} {host.Title}".Trim(), host, ct);
             return videoId is null ? null : await AudioAsync(videoId, ct);
         }
@@ -90,6 +101,15 @@ public sealed class YoutubeDirect
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Oublie le flux gardé pour cette vidéo : son URL ne répond plus (expirée plus tôt que prévu, refusée). Le
+    /// prochain <see cref="AudioAsync"/> en redemande une.
+    /// </summary>
+    public void Forget(string videoId)
+    {
+        lock (_audio) _audio.Remove(videoId);
     }
 
     /// <summary>Flux audio d'une vidéo connue (URL directe en cache quelques heures), ou null.</summary>
@@ -100,11 +120,21 @@ public sealed class YoutubeDirect
             if (_audio.TryGetValue(videoId, out var hit) && DateTimeOffset.UtcNow - hit.At < AudioLifetime) return hit.Audio;
         try
         {
-            var audio = await PlayerAsync(videoId, await VisitorAsync(false, ct), ct)
-                // Visiteur expiré ou refusé (« confirmez que vous n'êtes pas un robot ») : un neuf, une seule fois.
-                ?? await PlayerAsync(videoId, await VisitorAsync(true, ct), ct);
+            var (audio, renew) = await PlayerAsync(videoId, await VisitorAsync(false, ct), ct);
+            // Visiteur refusé (« confirmez que vous n'êtes pas un robot ») : un neuf, une seule fois. Pas pour une
+            // restriction d'âge ou de pays, qu'un autre visiteur ne lèverait pas.
+            if (audio is null && renew) (audio, _) = await PlayerAsync(videoId, await VisitorAsync(true, ct), ct);
             if (audio is not null)
-                lock (_audio) _audio[videoId] = (audio, DateTimeOffset.UtcNow);
+            {
+                var now = DateTimeOffset.UtcNow;
+                lock (_audio)
+                {
+                    // Les URL expirées ne servent plus à rien : purgées à chaque ajout, le cache ne grossit pas sans fin.
+                    foreach (var stale in _audio.Where(e => now - e.Value.At >= AudioLifetime).Select(e => e.Key).ToList())
+                        _audio.Remove(stale);
+                    _audio[videoId] = (audio, now);
+                }
+            }
             return audio;
         }
         catch (Exception ex) when (IsTransient(ex))
@@ -232,7 +262,7 @@ public sealed class YoutubeDirect
         return total;
     }
 
-    private async Task<YoutubeAudio?> PlayerAsync(string videoId, string visitor, CancellationToken ct)
+    private async Task<(YoutubeAudio? Audio, bool RenewVisitor)> PlayerAsync(string videoId, string visitor, CancellationToken ct)
     {
         var body = new JsonObject
         {
@@ -260,7 +290,24 @@ public sealed class YoutubeDirect
         req.Headers.TryAddWithoutValidation("X-Goog-Visitor-Id", visitor);
         using var res = await _http.SendAsync(req, ct);
         res.EnsureSuccessStatusCode();
-        return PickAudio(videoId, JsonNode.Parse(await res.Content.ReadAsStreamAsync(ct)));
+        var player = JsonNode.Parse(await res.Content.ReadAsStreamAsync(ct));
+        return (PickAudio(videoId, player), NeedsNewVisitor(player));
+    }
+
+    /// <summary>
+    /// Refus qu'un visiteur neuf peut lever : le contrôle anti-robot (« Sign in to confirm you're not a bot »), rendu
+    /// en LOGIN_REQUIRED. Règle étroite exprès : une restriction d'âge (LOGIN_REQUIRED aussi), de pays ou une vidéo
+    /// retirée (UNPLAYABLE, ERROR) ne dépendent pas du visiteur, une seconde requête ne ferait que retarder le repli.
+    /// </summary>
+    public static bool NeedsNewVisitor(JsonNode? player)
+    {
+        var status = player?["playabilityStatus"];
+        if (status?["status"]?.GetValue<string>() != "LOGIN_REQUIRED") return false;
+        var texts = new List<string?> { Text(status["reason"]) };
+        if (status["messages"] is JsonArray messages) texts.AddRange(messages.Select(Text));
+        return texts.Any(t => t is not null && System.Text.RegularExpressions.Regex.IsMatch(t, @"\bbot\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+
+        static string? Text(JsonNode? node) => node is JsonValue v && v.TryGetValue<string>(out var text) ? text : null;
     }
 
     /// <summary>Meilleur flux audio seul (opus/webm de préférence, sinon AAC/mp4) avec une URL directe.</summary>

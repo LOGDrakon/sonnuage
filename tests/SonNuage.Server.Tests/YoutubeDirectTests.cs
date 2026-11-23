@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text;
 using System.Text.Json.Nodes;
 using SonNuage.Contracts;
 using SonNuage.UI.Services;
@@ -140,4 +142,93 @@ public sealed class YoutubeDirectTests
     [InlineData(")]}'\n[broken")]
     public void An_unexpected_service_worker_reply_gives_no_visitor_id(string text) =>
         Assert.Null(YoutubeDirect.ParseVisitor(text));
+
+    [Fact]
+    public async Task A_failed_isrc_search_falls_back_to_artist_and_title()
+    {
+        var youtube = new FakeYoutube { FailQuery = "USRC17607839" };
+        var direct = new YoutubeDirect(youtube);
+
+        var audio = await direct.FindAsync(new JamTrackDto("Title", "Artist", null, 183, "USRC17607839"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("studio", audio?.VideoId);
+        Assert.Equal(["USRC17607839", "Artist Title"], youtube.Queries);
+    }
+
+    [Fact]
+    public async Task A_forgotten_stream_is_asked_again()
+    {
+        // Android le signale quand l'URL ne répond plus : la suivante doit être neuve, pas celle du cache.
+        var youtube = new FakeYoutube();
+        var direct = new YoutubeDirect(youtube);
+        var ct = TestContext.Current.CancellationToken;
+
+        await direct.AudioAsync("studio", ct);
+        await direct.AudioAsync("studio", ct);
+        Assert.Equal(1, youtube.Players);
+
+        direct.Forget("studio");
+        await direct.AudioAsync("studio", ct);
+        Assert.Equal(2, youtube.Players);
+    }
+
+    [Theory]
+    [InlineData("Sign in to confirm you’re not a bot", 2, 2)]
+    [InlineData("Sign in to confirm your age", 1, 1)]
+    public async Task Only_a_bot_check_renews_the_visitor(string reason, int players, int visitors)
+    {
+        // Un visiteur neuf répond au contrôle anti-robot ; il ne change rien à une restriction d'âge ou de pays.
+        var youtube = new FakeYoutube { Refusal = reason };
+        var direct = new YoutubeDirect(youtube);
+
+        Assert.Null(await direct.AudioAsync("studio", TestContext.Current.CancellationToken));
+        Assert.Equal(players, youtube.Players);
+        Assert.Equal(visitors, youtube.Visitors);
+    }
+
+    [Theory]
+    [InlineData("""{"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"Sign in to confirm you’re not a bot"}}""", true)]
+    [InlineData("""{"playabilityStatus":{"status":"LOGIN_REQUIRED","messages":["Sign in to confirm you're not a bot."]}}""", true)]
+    [InlineData("""{"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"Sign in to confirm your age"}}""", false)]
+    [InlineData("""{"playabilityStatus":{"status":"UNPLAYABLE","reason":"The uploader has not made this video available in your country"}}""", false)]
+    [InlineData("""{"playabilityStatus":{"status":"OK"}}""", false)]
+    public void The_visitor_is_renewed_only_for_a_bot_check(string json, bool renew) =>
+        Assert.Equal(renew, YoutubeDirect.NeedsNewVisitor(JsonNode.Parse(json)));
+
+    /// <summary>
+    /// YouTube : un visiteur, une recherche (« studio » à 3:04, ou une erreur pour <see cref="FailQuery"/>) et un
+    /// lecteur (flux opus, ou un refus de raison <see cref="Refusal"/>).
+    /// </summary>
+    private sealed class FakeYoutube : HttpMessageHandler
+    {
+        public string? FailQuery { get; init; }
+        public string? Refusal { get; init; }
+        public List<string> Queries { get; } = [];
+        public int Players { get; private set; }
+        public int Visitors { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/sw.js_data", StringComparison.Ordinal))
+            {
+                Visitors++;
+                return Json(")]}'\n" + $"[[\"a\",null,[[[\"x\",1,2,3,4,5,6,7,8,9,10,11,12,\"visitor{Visitors}\"]]]]]");
+            }
+            var body = JsonNode.Parse(await request.Content!.ReadAsStringAsync(ct))!;
+            if (path.EndsWith("/search", StringComparison.Ordinal))
+            {
+                var query = body["query"]!.GetValue<string>();
+                Queries.Add(query);
+                if (query == FailQuery) return new HttpResponseMessage(HttpStatusCode.InternalServerError);
+                return Json(Songs(("studio", "3:04")).ToJsonString());
+            }
+            Players++;
+            return Json(Refusal is { } reason
+                ? new JsonObject { ["playabilityStatus"] = new JsonObject { ["status"] = "LOGIN_REQUIRED", ["reason"] = reason } }.ToJsonString()
+                : """{"playabilityStatus":{"status":"OK"},"streamingData":{"adaptiveFormats":[{"mimeType":"audio/webm; codecs=\"opus\"","url":"opus","bitrate":120000}]}}""");
+        }
+
+        private static HttpResponseMessage Json(string text) => new(HttpStatusCode.OK) { Content = new StringContent(text, Encoding.UTF8, "application/json") };
+    }
 }
