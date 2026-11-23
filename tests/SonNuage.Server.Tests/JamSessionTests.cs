@@ -71,6 +71,23 @@ public sealed class JamSessionTests
         lock (seen) Assert.All(seen, title => Assert.Equal("Host song", title));
     }
 
+    [Fact]
+    public async Task A_command_that_cannot_reach_the_server_is_reported()
+    {
+        var server = new FakeJamServer(Playing(JamAudio.RemoteOnly)) { ControlFails = new HttpRequestException("réseau coupé") };
+        using var jam = await SessionAsync(server, new FakePlayer());
+        await jam.JoinAsync("https://spotify.link/x", JamAudio.RemoteOnly);
+        var failed = new List<string>();
+        jam.Failed += failed.Add;
+
+        await ((IPlayerRoute)jam).NextAsync();
+        server.ControlFails = new TaskCanceledException("délai dépassé");
+        await ((IPlayerRoute)jam).SeekAsync(10);
+
+        Assert.Equal(2, failed.Count);
+        Assert.All(failed, m => Assert.False(string.IsNullOrWhiteSpace(m)));
+    }
+
     // ---- Faux serveur ----
 
     private static JamStateDto Playing(JamAudio audio, TrackDto? resolved = null, double position = 30) => new(

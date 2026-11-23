@@ -1933,6 +1933,7 @@
     "unavailable": "« {title} » n’est pas dans votre bibliothèque et n’a pas pu être importé.",
     "notFound": "« {title} », joué sur Spotify, n’a pas été trouvé (même morceau, même version) : SonNuage reste muet jusqu’au titre suivant.",
     "needConnect": "Reliez d’abord votre compte Spotify.",
-    "connectOnDevice": "Un navigateur s’ouvrira pour se connecter à Spotify, puis reviendra ici."
+    "connectOnDevice": "Un navigateur s’ouvrira pour se connecter à Spotify, puis reviendra ici.",
+    "unreachable": "Le serveur de SonNuage ne répond pas : réessayez dans un instant."
   }
 }

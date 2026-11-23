@@ -141,7 +141,7 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         {
             await _api.JamLeaveAsync();
         }
-        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        catch (Exception ex) when (IsUnreachable(ex) || ex is ApiException)
         {
             // Même si l'appel échoue, on cesse de suivre côté appli.
         }
@@ -167,10 +167,20 @@ public sealed class JamSession : IDisposable, IPlayerRoute
                 StartFollow();
             }
         }
-        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        catch (Exception ex) when (IsUnreachable(ex) || ex is ApiException)
         {
+            // Serveur injoignable : on reprendra au prochain lancement ou à la prochaine connexion.
         }
     }
+
+    /// <summary>
+    /// Réseau coupé ou délai dépassé (HttpClient l'annonce par une annulation) : aucune de ces méthodes ne reçoit de
+    /// jeton d'annulation de l'appelant, une annulation est donc toujours un délai.
+    /// </summary>
+    private static bool IsUnreachable(Exception ex) => ex is HttpRequestException or OperationCanceledException;
+
+    private static string Unreachable =>
+        Localizer.Current?["jam.unreachable"] ?? SonNuage.Contracts.Localization.Translations.Instance.Get("en", "jam.unreachable");
 
     private void StartFollow()
     {
@@ -603,6 +613,10 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         {
             Failed?.Invoke(ex.Message);
         }
+        catch (Exception ex) when (IsUnreachable(ex))
+        {
+            Failed?.Invoke(Unreachable);
+        }
     }
 
     /// <summary>
@@ -621,6 +635,11 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             catch (ApiException ex)
             {
                 Failed?.Invoke(ex.Message);
+                return;
+            }
+            catch (Exception ex) when (IsUnreachable(ex))
+            {
+                Failed?.Invoke(Unreachable);
                 return;
             }
         }

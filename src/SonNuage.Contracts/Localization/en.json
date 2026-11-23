@@ -1933,6 +1933,7 @@
     "unavailable": "“{title}” isn’t in your library and couldn’t be imported.",
     "notFound": "“{title}”, playing on Spotify, wasn’t found (same song, same version): SonNuage stays silent until the next track.",
     "needConnect": "Connect your Spotify account first.",
-    "connectOnDevice": "A browser will open to sign in to Spotify, then come back here."
+    "connectOnDevice": "A browser will open to sign in to Spotify, then come back here.",
+    "unreachable": "SonNuage’s server isn’t answering: try again in a moment."
   }
 }
