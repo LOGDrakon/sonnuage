@@ -69,6 +69,42 @@ public sealed class JamTests
         Assert.Equal(["spotify:track:def"], state.NextTrackUris);
     }
 
+    [Theory]
+    [InlineData("\"is_playing\":false,\"is_paused\":false", true)]
+    [InlineData("\"is_playing\":true,\"is_paused\":true", true)]
+    [InlineData("\"is_playing\":true,\"is_paused\":false", false)]
+    [InlineData("\"is_paused\":false", false)]
+    public void A_json_state_plays_only_if_playing_and_not_paused(string flags, bool paused)
+    {
+        // Hôte arrêté (fin de file) : is_playing faux sans is_paused. Absent, is_playing ne dit rien.
+        var json = """{"player_state":{"track":{"uri":"spotify:track:a"},"position_as_of_timestamp":"0",""" + flags + "}}";
+        Assert.Equal(paused, ClusterState.Parse(Encoding.UTF8.GetBytes(json))!.IsPaused);
+    }
+
+    [Theory]
+    [InlineData(0, 0, true)]
+    [InlineData(1, 1, true)]
+    [InlineData(1, 0, false)]
+    [InlineData(-1, 0, false)]
+    public void A_protobuf_state_plays_only_if_playing_and_not_paused(int isPlaying, int isPaused, bool paused)
+    {
+        // PlayerState{ is_playing=12, is_paused=13 } ; -1 : is_playing absent.
+        var track = Pb.Msg(Pb.Str(1, "spotify:track:abc"));
+        byte[][] fields = isPlaying < 0
+            ? [Pb.Len(7, track), Pb.Varint(13, isPaused)]
+            : [Pb.Len(7, track), Pb.Varint(12, isPlaying), Pb.Varint(13, isPaused)];
+        var update = Pb.Len(1, Pb.Len(3, Pb.Concat(fields)));
+        Assert.Equal(paused, ClusterState.ParseClusterUpdate(update)!.IsPaused);
+    }
+
+    [Fact]
+    public void A_protobuf_length_past_the_end_is_not_read()
+    {
+        // Longueur annoncée énorme (débordement de i + len) : message ignoré, sans exception ni lecture hors borne.
+        byte[] huge = [0x0a, 0xff, 0xff, 0xff, 0xff, 0x07, 0x01];
+        Assert.Null(ClusterState.ParseClusterUpdate(huge));
+    }
+
     /// <summary>Encodeur protobuf minimal pour fabriquer des messages de test.</summary>
     private static class Pb
     {

@@ -80,7 +80,9 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
         var position = Num(ps, "position_as_of_timestamp");
         var timestamp = Num(ps, "timestamp");
         var duration = Num(ps, "duration");
-        var paused = ps.TryGetProperty("is_paused", out var p) && (p.ValueKind == JsonValueKind.True || p.ValueKind == JsonValueKind.String && p.GetString() == "true");
+        // En lecture = is_playing et pas is_paused : un hôte arrêté (fin de file) a is_playing faux sans être « en
+        // pause ». is_playing absent ne dit rien, is_paused seul décide.
+        var paused = Flag(ps, "is_paused") == true || Flag(ps, "is_playing") == false;
         // Sans titre, rien ne joue chez l'hôte (file finie, rien chargé) : un état arrêté, pas une absence d'état. Un
         // titre illisible, lui, ne dit rien : ignoré.
         if (uri is null) return hasTrack ? null : Stopped(timestamp);
@@ -99,6 +101,19 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
     private static string? Text(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
+    /// <summary>Booléen (ou « true »/« false » en chaîne), null si absent ou d'un autre type.</summary>
+    private static bool? Flag(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var v)) return null;
+        return v.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.String when bool.TryParse(v.GetString(), out var b) => b,
+            _ => null,
+        };
+    }
+
     /// <summary>Nombre éventuellement encodé en chaîne (les horodatages le sont souvent).</summary>
     private static long Num(JsonElement e, string name)
     {
@@ -115,7 +130,7 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
     // Le dealer envoie `hm://connect-state/v1/cluster` en protobuf `ClusterUpdate` (voir go-librespot). On ne lit que
     // les quelques champs utiles (uri, position, horodatage, pause, durée, file), sans dépendance protobuf lourde.
     // ClusterUpdate{ Cluster cluster=1 } · Cluster{ active_device_id=2; PlayerState player_state=3 }
-    // PlayerState{ timestamp=1; ProvidedTrack track=7; position_as_of_timestamp=10; duration=11; is_paused=13; repeated ProvidedTrack next_tracks=20 }
+    // PlayerState{ timestamp=1; ProvidedTrack track=7; position_as_of_timestamp=10; duration=11; is_playing=12; is_paused=13; repeated ProvidedTrack next_tracks=20 }
     // ProvidedTrack{ string uri=1 }
 
     /// <summary>Décode un push cluster protobuf en état de lecture, ou null si rien d'exploitable.</summary>
@@ -140,6 +155,7 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
     {
         long timestamp = 0, position = 0, duration = 0;
         var paused = false;
+        bool? playing = null;
         string? uri = null;
         var hasTrack = false;
         var next = new List<string>();
@@ -150,11 +166,14 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
                 case 1: timestamp = f.Varint; break;
                 case 10: position = f.Varint; break;
                 case 11: duration = f.Varint; break;
+                case 12: playing = f.Varint != 0; break;
                 case 13: paused = f.Varint != 0; break;
                 case 7 when f.Bytes is not null: hasTrack = true; uri = TrackUriProto(f.Bytes); break;
                 case 20 when f.Bytes is not null: if (TrackUriProto(f.Bytes) is { } u) next.Add(u); break;
             }
         }
+        // Comme en JSON : is_playing faux = arrêté ; absent (proto3 omet les faux), is_paused seul décide.
+        paused |= playing == false;
         return uri is null ? (hasTrack ? null : Stopped(timestamp)) : new ClusterState(uri, null, position, timestamp, paused, duration, next);
     }
 
@@ -180,11 +199,12 @@ public sealed record ClusterState(string? TrackUri, string? Title, long Position
                 case 0: yield return new PbField(field, 0, null, ReadVarint(data, ref i)); break;
                 case 1: i += 8; yield return new PbField(field, 1, null, 0); break;
                 case 2:
-                    var len = (int)ReadVarint(data, ref i);
-                    if (len < 0 || i + len > data.Length) yield break;
+                    // En long, comparé au reste : une longueur énorme ne déborde pas i + len.
+                    var len = ReadVarint(data, ref i);
+                    if (len < 0 || len > data.Length - i) yield break;
                     var b = new byte[len];
                     Array.Copy(data, i, b, 0, len);
-                    i += len;
+                    i += (int)len;
                     yield return new PbField(field, 2, b, 0);
                     break;
                 case 5: i += 4; yield return new PbField(field, 5, null, 0); break;
