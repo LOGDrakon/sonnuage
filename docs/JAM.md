@@ -45,22 +45,41 @@ modale l'annonce tout de suite.
 
   Le dealer pousse alors l'état de l'hôte (JSON `{"cluster":{"player_state":…}}`, gzip + base64) à chaque changement
   de titre, pause ou saut, avec `server_timestamp_ms` : l'écart d'horloge avec Spotify (temps de vol compris) est
-  estimé comme NTP, au minimum observé. Le keepalive tourne à part (annuler un `ReceiveAsync` .NET coupe la socket).
+  estimé comme NTP, au minimum observé. En lecture = `is_playing` et pas `is_paused` (un hôte en fin de file a
+  `is_playing` faux sans être en pause ; `is_playing` absent, `is_paused` seul décide). Le keepalive tourne à part
+  (annuler un `ReceiveAsync` .NET coupe la socket) : ping toutes les 30 s, et la connexion est coupée (donc reprise)
+  si rien n'est reçu depuis deux périodes ou si le ping ne part pas. Une trame illisible est sautée sans couper la
+  connexion ; trames et contenu décompressé sont bornés à 4 Mo.
 - **Fin** : un message `social-connect/v2/session_update` de raison `SESSION_DELETED`, `YOU_LEFT`, `YOU_WERE_KICKED`
   ou `YOU_WERE_REMOVED_UNSUPPORTED_CONTENT` termine le suivi. Une connexion perdue est reprise (1, 5, 15, 30 s) ; après
-  quatre échecs d'affilée, ou un join refusé, le suivi s'arrête aussi. Dans tous les cas l'état inactif est poussé aux
-  appareils. Quitter appelle `POST social-connect/v3/sessions/{id}/leave`.
+  quatre échecs d'affilée, ou un join refusé, le suivi s'arrête aussi. Une connexion ne remet le compte des échecs à
+  zéro que si elle a tenu au moins 60 s (un dealer qui ferme aussitôt après chaque join ne fait pas boucler le suivi).
+  Dans tous les cas l'état inactif est poussé aux appareils. Quitter appelle `POST social-connect/v3/sessions/{id}/leave`
+  (l'identifiant est redemandé si les infos de session n'avaient pas répondu au join ; les commandes, elles, n'en ont
+  pas besoin).
 - **Préparation** : le titre en cours et les deux suivants de la file de l'hôte sont préparés d'avance — métadonnées
   et **ISRC** par `spclient /metadata/4/track/{gid}` (page d'intégration en secours), bibliothèque, sinon import YouTube
   en mode invité (la vidéo est importée sous le titre et l'artiste de Spotify, pas sous son propre nom). Un échec
   passager est retenté (1 min, ou 10 min si la recherche ou l'import a échoué).
+- **Import et quota** : un import lancé par un Jam est une demande de téléchargement. Il faut pouvoir demander au
+  « join » (admin ou contributeur), puis, relu en base à chaque import : admin, ou contributeur dont les demandes sont
+  acceptées d'office (sinon l'import passerait outre l'approbation), dans son quota sur 24 h. Chaque import est tracé
+  comme une demande acceptée d'office (note « Jam Spotify »), compte dans ce quota et apparaît dans l'historique de
+  l'admin ; une vidéo déjà importée ne compte pas. Au plus 30 imports par suivi, en garde-fou. Sans droit (ou au-delà),
+  le titre est « introuvable » côté serveur et l'appareil le joue depuis YouTube en direct.
 - **Correspondance** (`JamMatch`, une seule règle pour la bibliothèque, l'import, YouTube direct et la recherche
   Spotify) : la durée colle (audio ±max(6 s, 4 %), vidéo ±max(15 s, 12 %)) ; même ISRC = même enregistrement ;
-  sinon même version (remix, live, accéléré, reprise… dans les suffixes), l'un des artistes présent (« feat. », « & »,
-  « x », virgules séparés), tous les mots du titre et au plus un mot en trop inexpliqué. Le meilleur score gagne ; un
-  doute est un refus. Chaque décision est journalisée (titre, où, candidats, choix et raison).
+  sinon même version (remix, live, accéléré, reprise, réenregistrement « Taylor's Version »… dans les suffixes ; deux
+  lives de lieux différents sont deux versions ; « Pt. 2 », « Part II » ou un chiffre romain final sont une autre
+  partie), l'artiste présent, tous les mots du titre et au plus un mot en trop inexpliqué. Artiste : le nom entier, ou
+  l'un des artistes réunis (« feat. », « & », « x », virgules séparés). Un morceau d'un seul mot (« Fire » de
+  « Earth, Wind & Fire ») doit être un nom entier du candidat, pas un mot de son nom (« Arcade Fire ») ; « , The … » ou
+  « + The … » continue le nom (« Tyler, The Creator », « Florence + The Machine »). Le meilleur score gagne ; un doute
+  est un refus. Chaque décision est journalisée (titre, où, candidats, choix et raison).
 - **Diffusion** (`GET /api/me/jam/stream`, Server-Sent Events) : l'état (`JamStateDto`, avec les suivants déjà
-  résolus dans `Upcoming`) est poussé à tous les appareils du compte, et renvoyé frais toutes les 10 s.
+  résolus dans `Upcoming`) est poussé à tous les appareils du compte, et renvoyé frais toutes les 10 s. Le calcul et
+  l'envoi d'un état, le changement de suivi et l'abonnement passent par un même verrou : un état d'un suivi arrêté ou
+  remplacé ne part plus après l'état inactif, ni un état plus ancien après un plus récent.
 - **Lecture en phase** (`JamSession`, appli) : départ directement à la position de l'hôte ; titres suivants mis en
   file pour un enchaînement sans blanc ; écart > 2,5 s → un saut, sinon la vitesse est ajustée de quelques % (hauteur
   conservée) jusqu'à moins de 40 ms. Titre absent du serveur : lecture YouTube directe sur l'appareil
@@ -91,7 +110,7 @@ En mémoire : un redémarrage du serveur arrête les suivis.
 | GET | `/spotify` | État de la liaison Spotify (connecté ? nom affiché). |
 | PUT | `/spotify/token` | Enregistre les jetons obtenus sur l'appareil. |
 | DELETE | `/spotify/token` | Délie Spotify (et quitte le Jam suivi). |
-| POST | `/join` | Rejoint un Jam depuis un lien, mode `RemoteOnly`/`Guest`. 409 si Spotify refuse. |
+| POST | `/join` | Rejoint un Jam depuis un lien, mode `RemoteOnly`/`Guest`. 400 si le lien est illisible ou injoignable, ou le mode inconnu ; 409 si Spotify refuse. |
 | POST | `/leave` | Arrête de suivre et quitte le Jam côté Spotify. |
 | GET | `/state` | État courant (one-shot). |
 | GET | `/stream` | Flux d'état (SSE). |
@@ -109,6 +128,7 @@ Deezer Connect ne relie que les appareils d'un même compte. Un lien Deezer coll
 - Choisir un titre de la file dans Android Auto reste local (la synchro le rattrape).
 
 - **Reprise après redémarrage du serveur** (re-suivre automatiquement les Jams actifs).
-- Décider si un **import** déclenché par un Jam doit compter dans le quota quotidien du compte.
+- Un contributeur dont les demandes attendent un admin n'importe rien depuis un Jam (YouTube direct seulement) : on
+  pourrait créer des demandes en attente à la place.
 - À terme, déplacer le suivi dans l'appli (le serveur est partagé) : le code de protocole (`ClusterState`,
   `SessionUpdate`, dealer) se reporte tel quel.
