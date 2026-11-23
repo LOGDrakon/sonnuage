@@ -191,6 +191,7 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         _playingSource = null;
         _playing = null;
         _missingSource = null;
+        _held = false;
         // Une recherche ratée lors d'un Jam précédent ne doit pas condamner le même titre dans celui-ci.
         lock (_lookupGate)
         {
@@ -207,6 +208,7 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         if (Math.Abs(_speed - 1) > 0.001) { _speed = 1; _ = _player.SetSpeedAsync(1); }
         _follow?.Cancel();
         _follow = null;
+        _held = false;
     }
 
     private async Task FollowAsync(CancellationToken ct)
@@ -274,12 +276,17 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             // Titre absent de la bibliothèque : la recherche YouTube part dès la réception, sans attendre la boucle.
             var source = state.SourceTrackId ?? state.Track?.Title;
             if (source is not null && source != _playingSource) _ = YoutubeLookup(state, source);
-            if (_wake.CurrentCount == 0) try { _wake.Release(); } catch (SemaphoreFullException) { }
+            Wake();
         }
         // Le son sort chez l'hôte : ce qui jouait ici s'arrête (sinon on entendrait les deux).
         if (state is { Active: true, Audio: JamAudio.RemoteOnly } && !wasHostOnly) _ = PauseLocalAsync();
         StateChanged?.Invoke();
         ShownChanged?.Invoke();
+    }
+
+    private void Wake()
+    {
+        if (_wake.CurrentCount == 0) try { _wake.Release(); } catch (SemaphoreFullException) { }
     }
 
     /// <summary>
@@ -339,6 +346,13 @@ public sealed class JamSession : IDisposable, IPlayerRoute
 
     private async Task SyncOnceAsync(JamStateDto state, CancellationToken ct)
     {
+        // Son local coupé par le système (voir HoldLocalAudio) : rien ne repart ici avant que l'utilisateur relance.
+        // Les changements de titre de l'hôte seront rattrapés à la reprise, à sa position.
+        if (_held)
+        {
+            await SetSpeedAsync(1);
+            return;
+        }
         var source = SourceOf(state);
         if (source is null)
         {
@@ -668,11 +682,36 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         if (_player.State.IsPlaying) await _player.TogglePlayAsync();
     });
 
-    Task IPlayerRoute.TogglePlayAsync() => ControlAsync(new JamControlRequest(State.IsPlaying ? JamControl.Pause : JamControl.Resume));
+    // Retenu, le lecteur local est en pause : une bascule est une demande de lecture.
+    Task IPlayerRoute.TogglePlayAsync() =>
+        ReleaseHold() ? Task.CompletedTask : ControlAsync(new JamControlRequest(State.IsPlaying ? JamControl.Pause : JamControl.Resume));
 
-    Task IPlayerRoute.SetPlayingAsync(bool playing) => ControlAsync(new JamControlRequest(playing ? JamControl.Resume : JamControl.Pause));
+    // Une pause, elle, part chez l'hôte comme d'habitude (la retenue reste).
+    Task IPlayerRoute.SetPlayingAsync(bool playing) =>
+        playing && ReleaseHold() ? Task.CompletedTask : ControlAsync(new JamControlRequest(playing ? JamControl.Resume : JamControl.Pause));
 
-    void IPlayerRoute.HoldLocalAudio() { }
+    /// <summary>
+    /// Son local coupé par le système (casque débranché, focus audio perdu), mode invité seulement : la synchro le
+    /// laisse en pause. Levée par la prochaine commande de lecture de l'utilisateur, ou en quittant / rejoignant un Jam.
+    /// </summary>
+    private volatile bool _held;
+
+    void IPlayerRoute.HoldLocalAudio()
+    {
+        if (State is { Active: true, Audio: JamAudio.Guest }) _held = true;
+    }
+
+    /// <summary>
+    /// L'utilisateur veut lire : la retenue tombe et la synchro relance le son ici. Vrai si l'hôte joue déjà (rien à
+    /// lui envoyer) ; faux sans retenue, ou si l'hôte est lui aussi en pause (il faut le relancer).
+    /// </summary>
+    private bool ReleaseHold()
+    {
+        if (!_held) return false;
+        _held = false;
+        Wake();
+        return State.IsPlaying;
+    }
 
     Task IPlayerRoute.SeekAsync(double seconds) => ControlAsync(new JamControlRequest(JamControl.Seek, seconds));
 

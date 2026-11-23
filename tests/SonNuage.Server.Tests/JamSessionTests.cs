@@ -127,6 +127,48 @@ public sealed class JamSessionTests
         await Until(() => local.State.Current?.Id == next.Id, TimeSpan.FromSeconds(2));
     }
 
+    [Fact]
+    public async Task Sound_cut_by_the_system_stays_paused_until_the_user_plays()
+    {
+        // Casque débranché en mode invité : Android coupe le son local et le dit à la route. La synchro ne doit pas le
+        // relancer ; la lecture suivante de l'utilisateur le relance ici, sans rien envoyer à l'hôte (qui joue déjà).
+        var track = Library("Song");
+        var local = new FakePlayer();
+        var server = new FakeJamServer(Playing(JamAudio.Guest, track));
+        using var jam = await SessionAsync(server, local);
+        IPlayerRoute route = jam;
+        await jam.JoinAsync("https://spotify.link/x", JamAudio.Guest);
+        await Until(() => local.State.Current?.Id == track.Id && local.State.IsPlaying);
+
+        route.HoldLocalAudio();
+        await local.TogglePlayAsync();
+        await Task.Delay(2000);
+        Assert.False(local.State.IsPlaying);
+
+        await route.TogglePlayAsync();
+        await Until(() => local.State.IsPlaying);
+        Assert.Empty(server.Controls);
+    }
+
+    [Fact]
+    public async Task A_pause_while_the_sound_is_held_still_goes_to_the_host()
+    {
+        var track = Library("Song");
+        var local = new FakePlayer();
+        var server = new FakeJamServer(Playing(JamAudio.Guest, track));
+        using var jam = await SessionAsync(server, local);
+        IPlayerRoute route = jam;
+        await jam.JoinAsync("https://spotify.link/x", JamAudio.Guest);
+        await Until(() => local.State.IsPlaying);
+
+        route.HoldLocalAudio();
+        await local.TogglePlayAsync();
+        await route.SetPlayingAsync(false);
+
+        var sent = JsonSerializer.Deserialize<JamControlRequest>(Assert.Single(server.Controls), JsonDefaults.Options);
+        Assert.Equal(JamControl.Pause, sent?.Action);
+    }
+
     // ---- Faux serveur ----
 
     private static JamStateDto Playing(JamAudio audio, TrackDto? resolved = null, double position = 30) => new(
