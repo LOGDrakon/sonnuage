@@ -548,6 +548,26 @@ public sealed class JamApiTests(SonNuageFactory factory) : IClassFixture<SonNuag
         Assert.Equal((SonNuage.Server.Data.DownloadRequestDecision.Accepted, true), (request.Decision, request.AutoApproved));
     }
 
+    [Fact]
+    public async Task Parallel_jam_imports_do_not_exceed_the_quota()
+    {
+        // Le titre courant et les deux suivants se préparent en même temps : sans verrou, chacun voyait le quota libre.
+        var auto = await CreateAsync("jam-import-race", Roles.Contributor, perDay: 1, auto: true);
+        var now = DateTimeOffset.UtcNow;
+        var results = await Task.WhenAll(Enumerable.Range(0, 3).Select(async i =>
+        {
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<SonNuage.Server.Data.SonNuageDbContext>();
+            var video = new YoutubeVideoDto($"jamrace{i:D4}", "Artist - Song", "Artist", 200, null, null);
+            return await JamResolver.ImportWithinQuotaAsync(db, auto.Id, video, async () => { await Task.Delay(50, Ct); return true; }, now, Ct);
+        }));
+        Assert.Equal(1, results.Count(r => r == JamImportRight.Allowed));
+        Assert.Equal(2, results.Count(r => r == JamImportRight.Quota));
+        using var check = factory.Services.CreateScope();
+        var checkDb = check.ServiceProvider.GetRequiredService<SonNuage.Server.Data.SonNuageDbContext>();
+        Assert.Equal(1, await checkDb.DownloadRequests.CountAsync(r => r.UserId == auto.Id, Ct));
+    }
+
     private static Task<HttpResponseMessage> SaveTokenAsync(HttpClient client, string? refresh, string? displayName) =>
         client.PutAsJsonAsync("/api/me/jam/spotify/token",
             new MusicServiceTokenRequest(SonNuage.Contracts.Jam.Spotify, "fake-access", refresh, 3600, displayName), Ct);

@@ -94,9 +94,14 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
             Trace(track, "import YouTube", ranked.Count, best is { } p ? $"« {p.Entry.Title} » — {p.Entry.Channel}" : null, null);
             if (best is null) return null;
             var video = ImportVideo(best.Entry, track);
-            var result = await importer.EnqueueAsync(db, [video], albumHint: null, subscriptionId: null, ct);
-            // Vidéo déjà importée ou en cours : rien de nouveau, rien à compter.
-            if (result.Queued > 0) await RecordImportAsync(db, userId, video, DateTimeOffset.UtcNow, ct);
+            right = await ImportWithinQuotaAsync(db, userId, video,
+                async () => (await importer.EnqueueAsync(db, [video], albumHint: null, subscriptionId: null, ct)).Queued > 0,
+                DateTimeOffset.UtcNow, ct);
+            if (right != JamImportRight.Allowed)
+            {
+                log.LogInformation("Jam : « {Title} » — {Artist} : import refusé au compte ({Right})", track.Title, track.Artist, right);
+                return null;
+            }
             return best.Entry.Id;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -119,6 +124,32 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
         if (user.Role != Roles.Contributor || !user.AutoApproveRequests) return JamImportRight.NotAllowed;
         return await DownloadRequestEndpoints.UsedAsync(db, userId, now, ct) >= user.RequestsPerDay ? JamImportRight.Quota : JamImportRight.Allowed;
     }
+
+    /// <summary>
+    /// Revérifie le droit, met la vidéo en file (<paramref name="enqueue"/> : vrai si un import nouveau est parti) et le
+    /// compte, d'un seul tenant par compte : le titre courant et les suivants se préparent en parallèle, et chacun aurait
+    /// vu le quota libre.
+    /// </summary>
+    internal static async Task<JamImportRight> ImportWithinQuotaAsync(SonNuageDbContext db, Guid userId, YoutubeVideoDto video, Func<Task<bool>> enqueue, DateTimeOffset now, CancellationToken ct)
+    {
+        var gate = ImportGates.GetOrAdd(userId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            var right = await ImportRightAsync(db, userId, now, ct);
+            if (right != JamImportRight.Allowed) return right;
+            // Vidéo déjà importée ou en cours : rien de nouveau, rien à compter.
+            if (await enqueue()) await RecordImportAsync(db, userId, video, now, ct);
+            return JamImportRight.Allowed;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Un verrou par compte (quelques comptes au plus : jamais libérés).</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> ImportGates = new();
 
     /// <summary>
     /// Trace l'import comme une demande acceptée d'office : elle compte dans le quota du jour (même décompte que les
