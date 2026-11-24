@@ -70,12 +70,15 @@ modale l'annonce tout de suite.
 - **Correspondance** (`JamMatch`, une seule règle pour la bibliothèque, l'import, YouTube direct et la recherche
   Spotify) : la durée colle (audio ±max(6 s, 4 %), vidéo ±max(15 s, 12 %)) ; même ISRC = même enregistrement ;
   sinon même version (remix, live, accéléré, reprise, réenregistrement « Taylor's Version »… dans les suffixes ; deux
-  lives de lieux différents sont deux versions ; « Pt. 2 », « Part II » ou un chiffre romain final sont une autre
-  partie), l'artiste présent, tous les mots du titre et au plus un mot en trop inexpliqué. Artiste : le nom entier, ou
-  l'un des artistes réunis (« feat. », « & », « x », virgules séparés). Un morceau d'un seul mot (« Fire » de
-  « Earth, Wind & Fire ») doit être un nom entier du candidat, pas un mot de son nom (« Arcade Fire ») ; « , The … » ou
-  « + The … » continue le nom (« Tyler, The Creator », « Florence + The Machine »). Le meilleur score gagne ; un doute
-  est un refus. Chaque décision est journalisée (titre, où, candidats, choix et raison).
+  lives de lieux différents sont deux versions : le lieu se lit après « live », sans années, mois ni « Remaster », et
+  un lieu absent ou contenu dans l'autre ne tranche pas ; « Pt. 2 », « Part II » ou un chiffre romain final sont une
+  autre partie, lu après le tiret d'un « Artiste - Titre »), l'artiste présent, tous les mots du titre et au plus un mot
+  en trop inexpliqué (une année ne compte pas, un chiffre romain si). Artiste : le nom entier, ou l'un des artistes
+  réunis (« feat. », « & », « x », virgules séparés). Un morceau d'un seul mot (« Fire » de « Earth, Wind & Fire »)
+  doit être un nom entier du candidat, pas un mot de son nom (« Arcade Fire »), ou ce nom collé à l'habillage d'une
+  chaîne (« DrakeVEVO », « EminemMusic »). « , The … » peut être un second artiste (« Ariana Grande, The Weeknd ») ou
+  la suite du nom (« Tyler, The Creator ») : les deux lectures sont essayées, et « The Creator » seul doit garder son
+  « The » chez le candidat. Le meilleur score gagne ; un doute est un refus. Chaque décision est journalisée (titre, où, candidats, choix et raison).
 - **Diffusion** (`GET /api/me/jam/stream`, Server-Sent Events) : l'état (`JamStateDto`, avec les suivants déjà
   résolus dans `Upcoming`) est poussé à tous les appareils du compte, et renvoyé frais toutes les 10 s. Le calcul et
   l'envoi d'un état, le changement de suivi et l'abonnement passent par un même verrou : un état d'un suivi arrêté ou

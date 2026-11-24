@@ -130,6 +130,56 @@ public sealed class JamMatchTests
     }
 
     [Theory]
+    [InlineData("Metro Boomin, The Weeknd, 21 Savage", "Metro Boomin")]
+    [InlineData("Ariana Grande, The Weeknd", "Ariana Grande")]
+    [InlineData("Ariana Grande, The Weeknd", "The Weeknd")]
+    [InlineData("Future, The Weeknd", "Future")]
+    [InlineData("Selena Gomez, A$AP Rocky", "Selena Gomez")]
+    [InlineData("Tyler, The Creator, A$AP Rocky", "Tyler, The Creator")]
+    [InlineData("Tyler, The Creator", "Tyler, The Creator")]
+    [InlineData("Florence + The Machine", "Florence + the Machine")]
+    [InlineData("Florence + The Machine", "Florence and the Machine")]
+    public void A_second_artist_starting_with_the_is_still_a_separate_artist(string host, string candidate)
+    {
+        // Spotify joint les artistes par « , » : « The Weeknd » après une virgule n'allonge pas le nom précédent
+        // (sauf peut-être « Tyler, The Creator » : les deux lectures sont essayées).
+        Assert.True(JamMatch.Evaluate(Host("Song", host, 200), Audio("Song", candidate, 200)).Accepted);
+    }
+
+    [Theory]
+    [InlineData("Drake, Future", "DrakeVEVO")]
+    [InlineData("Eminem, Rihanna", "EminemMusic")]
+    public void A_short_artist_is_found_in_its_channel_name(string host, string channel) =>
+        Assert.True(JamMatch.Evaluate(Host("Jumpman", host, 200), Video("Jumpman", channel, 200)).Accepted);
+
+    [Theory]
+    [InlineData("The Unforgiven II", "Metallica", "Metallica - The Unforgiven II (Official Music Video)")]
+    [InlineData("Chapter VI", "Candlemass", "Candlemass - Chapter VI")]
+    [InlineData("Part of Me", "Katy Perry", "Katy Perry - Part Of Me (Official)")]
+    [InlineData("The Part I Play", "Some Band", "Some Band - The Part I Play")]
+    [InlineData("Finding Out True Love Is Blind", "Louis XIV", "Louis XIV - Finding Out True Love Is Blind")]
+    public void A_part_number_is_read_after_the_artist_of_a_video_title(string title, string artist, string video) =>
+        Assert.True(JamMatch.Evaluate(Host(title, artist, 300), Video(video, artist, 300)).Accepted);
+
+    [Fact]
+    public void Another_part_after_the_artist_of_a_video_title_is_rejected()
+    {
+        var host = Host("The Unforgiven", "Metallica", 380);
+        Assert.False(JamMatch.Evaluate(host, Video("Metallica - The Unforgiven III", "Metallica", 380)).Accepted);
+    }
+
+    [Theory]
+    [InlineData("Radio Ga Ga - Live at Wembley", "Queen - Radio Ga Ga (Live)", "Queen")]
+    [InlineData("Radio Ga Ga - Live at Wembley Stadium, July 1986", "Queen - Radio Ga Ga (Live at Wembley)", "Queen")]
+    [InlineData("Radio Ga Ga - Live at Wembley Stadium, July 1986", "Radio Ga Ga (Live at Wembley '86)", "Queen")]
+    [InlineData("Hotel California - Live; 2013 Remaster", "Hotel California (Live at the Forum)", "Eagles")]
+    public void A_live_place_is_read_only_after_live(string host, string candidate, string artist)
+    {
+        Assert.True(JamMatch.SameVersion(host, candidate));
+        Assert.True(JamMatch.Evaluate(Host(host, artist, 300), Video(candidate, artist, 300)).Accepted);
+    }
+
+    [Theory]
     [InlineData("Song", "Song, Pt. 2")]
     [InlineData("Song", "Song Part II")]
     [InlineData("Song", "Song II")]

@@ -64,9 +64,12 @@ public static partial class JamMatch
         // « Earth, Wind & Fire » dans « Arcade Fire », « Simon » dans « Paul Simon ») : d'un seul mot, il doit être
         // un nom entier du candidat (son artiste, l'un de ses artistes, ou l'artiste en tête du titre « Artiste - … ») ;
         // de plusieurs mots, il suffit qu'il y soit.
-        var candidateNames = ArtistNames(candidate.Artist).Concat(TitleArtist(candidate.Title) is { } lead ? ArtistNames(lead) : []).ToList();
+        // « The Creator » de « Tyler, The Creator » n'est pas « Creator » : un morceau d'un mot qui commence par « The »
+        // doit avoir son « The » chez le candidat (« The Weeknd », « TheWeekndVEVO »).
+        var candidateNames = CandidateNames(candidate.Artist).Concat(TitleArtist(candidate.Title) is { } lead ? CandidateNames(lead) : []).ToList();
         bool FragmentIn(string f, HashSet<string> words, string squashed) =>
-            Significant(f).Count > 1 ? ArtistIn(f, words, squashed) : candidateNames.Any(n => SameName(f, n));
+            Significant(f).Count > 1 ? ArtistIn(f, words, squashed)
+            : candidateNames.Any(n => StartsWithContinuation(f) ? Squash(f) == ChannelKey(n) : SameName(f, n));
         var inArtistField = ArtistIn(host.Artist, artistWords, Squash(candidate.Artist))
             || fragments.Any(f => FragmentIn(f, artistWords, Squash(candidate.Artist)));
         if (!inArtistField && !ArtistIn(host.Artist, titleWords, Squash(candidate.Title))
@@ -79,7 +82,11 @@ public static partial class JamMatch
         explained.UnionWith(Words(host.Title));
         foreach (var a in artists) explained.UnionWith(Words(a));
         explained.UnionWith(artistWords);
-        var extra = titleWords.Count(w => !explained.Contains(w) && !Noise.Contains(w) && !w.All(char.IsDigit));
+        // Deux lives (même version vérifiée plus haut) : « Live at the … » ne compte pas, le lieu seul reste un mot en trop.
+        if (VersionTags(host.Title).Tags.Contains("live")) explained.UnionWith(LiveFiller);
+        // Un nombre écrit (une année) ne compte pas ; un chiffre romain (« III ») si : c'est peut-être une autre partie.
+        var digits = Tokens(candidate.Title).Where(t => t.All(char.IsDigit)).ToHashSet();
+        var extra = titleWords.Count(w => !explained.Contains(w) && !Noise.Contains(w) && !digits.Contains(w));
         if (extra > 1) return JamVerdict.Reject("titre");
 
         var score = 60;
@@ -99,7 +106,7 @@ public static partial class JamMatch
     {
         var (hostTags, hostPlace) = VersionTags(hostTitle);
         var (candidateTags, candidatePlace) = VersionTags(candidateTitle);
-        if (!hostTags.SetEquals(candidateTags) || PartOf(hostTitle) != PartOf(candidateTitle)) return false;
+        if (!hostTags.SetEquals(candidateTags) || PartOf(hostTitle, null) != PartOf(candidateTitle, CoreTitle(hostTitle))) return false;
         // Deux lives : le même concert. Un lieu absent d'un côté (« - Live ») ne tranche pas ; « Wembley » et
         // « Wembley Stadium » non plus (l'un contient l'autre).
         return hostPlace.Count == 0 || candidatePlace.Count == 0 || hostPlace.IsSubsetOf(candidatePlace) || candidatePlace.IsSubsetOf(hostPlace);
@@ -107,14 +114,23 @@ public static partial class JamMatch
 
     /// <summary>
     /// Numéro de partie : « Pt. 2 », « Part II », ou un chiffre romain final (« Song II ») ; null sans partie.
-    /// « Song » et « Song, Pt. 2 » sont deux morceaux.
+    /// « Song » et « Song, Pt. 2 » sont deux morceaux. Le chiffre final se lit sur le nom du morceau : dans
+    /// « Artiste - Titre » (vidéo), c'est la partie après le tiret qui contient le titre de l'hôte
+    /// (<paramref name="hostCore"/>), pas « Louis XIV » avant.
     /// </summary>
-    private static int? PartOf(string title)
+    private static int? PartOf(string title, string? hostCore)
     {
         var tokens = Tokens(title);
         for (var i = 0; i + 1 < tokens.Count; i++)
             if (tokens[i] is "part" or "pt" && PartNumber(tokens[i + 1]) is { } n) return n;
-        var core = Tokens(CoreTitle(title));
+        var name = CoreTitle(title);
+        var wanted = Words(hostCore);
+        if (wanted.Count > 0 && !wanted.IsSubsetOf(Words(name)) && DashTail().Match(title) is { Success: true } dash)
+        {
+            var tail = CoreTitle(Brackets().Replace(dash.Value, " ").TrimStart(' ', '-', '–', '—'));
+            if (wanted.IsSubsetOf(Words(tail))) name = tail;
+        }
+        var core = Tokens(name);
         return core.Count > 1 && Roman(core[^1], single: false) is { } last ? last : null;
     }
 
@@ -153,26 +169,44 @@ public static partial class JamMatch
 
     /// <summary>
     /// Le nom entier et chacun des artistes réunis : « Gym Class Heroes, Adam Levine », « ivycomb feat. YonKaGor »,
-    /// « A &amp; B », « A x B »… Un seul suffit (« Tyler, The Creator » reste trouvé par son nom entier).
+    /// « A &amp; B », « A x B »… Un seul suffit. Spotify joint les artistes par « , » : « Ariana Grande, The Weeknd »
+    /// est deux artistes, « Tyler, The Creator » un seul. Les deux lectures sont donc essayées : chaque morceau, puis
+    /// le morceau en « The … » recollé au précédent (« Tyler The Creator »).
     /// </summary>
     private static IEnumerable<string> ArtistNames(string artist)
     {
         if (string.IsNullOrWhiteSpace(artist)) yield break;
         yield return artist;
-        // Un morceau qui commence par « The » continue le nom précédent (« Tyler, The Creator »,
-        // « Florence + The Machine ») : ce n'est pas un second artiste.
+        var parts = SplitArtists(artist);
+        if (parts.Count < 2) yield break;
+        foreach (var part in parts) yield return part;
+        for (var i = 1; i < parts.Count; i++)
+            if (StartsWithContinuation(parts[i])) yield return parts[i - 1] + " " + parts[i];
+    }
+
+    /// <summary>
+    /// Les noms du candidat, auxquels un morceau d'un mot doit être égal : le nom entier et ses artistes, un morceau en
+    /// « The … » recollé au précédent (un candidat « Tyler, The Creator » n'a pas d'artiste « Tyler »).
+    /// </summary>
+    private static IEnumerable<string> CandidateNames(string artist)
+    {
+        if (string.IsNullOrWhiteSpace(artist)) yield break;
+        yield return artist;
         var names = new List<string>();
-        foreach (var part in ArtistSeparators().Split(artist))
-        {
-            if (part.Trim() is not { Length: > 0 } name) continue;
-            if (names.Count > 0 && Tokens(name) is [var first, ..] && ContinuesName.Contains(first)) names[^1] += " " + name;
-            else names.Add(name);
-        }
+        foreach (var part in SplitArtists(artist))
+            if (names.Count > 0 && StartsWithContinuation(part)) names[^1] += " " + part;
+            else names.Add(part);
         if (names.Count < 2) yield break;
         foreach (var name in names) yield return name;
     }
 
-    private static readonly HashSet<string> ContinuesName = ["the", "and", "of", "a"];
+    private static List<string> SplitArtists(string artist) =>
+        ArtistSeparators().Split(artist).Select(p => p.Trim()).Where(p => p.Length > 0).ToList();
+
+    /// <summary>Un morceau qui peut continuer le nom précédent (« , The Creator », « + The Machine »).</summary>
+    private static bool StartsWithContinuation(string part) => Tokens(part) is [var first, ..] && ContinuesName.Contains(first);
+
+    private static readonly HashSet<string> ContinuesName = ["the", "and", "of"];
 
     /// <summary>Mots qui font le nom : sans « The », « and », ni l'habillage d'une chaîne (« - Topic », « VEVO »).</summary>
     private static HashSet<string> Significant(string name)
@@ -182,12 +216,31 @@ public static partial class JamMatch
         return words;
     }
 
-    /// <summary>Même nom, à l'habillage près (« Baasik » et « Baasik - Topic »).</summary>
+    /// <summary>Même nom, à l'habillage près (« Baasik » et « Baasik - Topic », « Drake » et « DrakeVEVO »).</summary>
     private static bool SameName(string a, string b)
     {
         var mine = Significant(a);
-        return mine.Count > 0 && mine.SetEquals(Significant(b)) || Squash(a).Length > 0 && Squash(a) == Squash(b);
+        return mine.Count > 0 && mine.SetEquals(Significant(b)) || Squash(a).Length > 0 && Squash(a) == ChannelKey(b);
     }
+
+    /// <summary>Nom collé sans l'habillage d'une chaîne en fin (« DrakeVEVO », « EminemMusic » : « drake », « eminem »).</summary>
+    private static string ChannelKey(string name)
+    {
+        var key = Squash(name);
+        for (var trimmed = true; trimmed;)
+        {
+            trimmed = false;
+            foreach (var suffix in ChannelSuffixes)
+                if (key.Length > suffix.Length && key.EndsWith(suffix, StringComparison.Ordinal))
+                {
+                    key = key[..^suffix.Length];
+                    trimmed = true;
+                }
+        }
+        return key;
+    }
+
+    private static readonly string[] ChannelSuffixes = ["vevo", "music", "official", "topic"];
 
     /// <summary>L'artiste en tête d'un titre « Artiste - Titre », ou null.</summary>
     private static string? TitleArtist(string title)
@@ -231,16 +284,38 @@ public static partial class JamMatch
             var text = m.Groups[1].Value + m.Groups[2].Value + m.Groups[3].Value + m.Groups[4].Value;
             foreach (var (tag, pattern) in Tags)
                 if (pattern.IsMatch(text)) tags.Add(tag);
-            if (LiveTag.IsMatch(text))
+            if (!m.Groups[4].Success) place.UnionWith(LivePlace(text));
+            else
             {
-                var words = Words(text);
-                words.ExceptWith(Noise);
-                words.ExceptWith(LiveFiller);
-                place.UnionWith(words);
+                // Après un tiret, les parenthèses sont dedans (« Artiste - Titre (Live at Wembley) ») : chacune à part.
+                place.UnionWith(LivePlace(Brackets().Replace(text, " ")));
+                foreach (Match b in Brackets().Matches(text)) place.UnionWith(LivePlace(b.Value));
             }
         }
         return (tags, place);
     }
+
+    /// <summary>
+    /// Le lieu d'un suffixe live : les mots après « live » (« Live at Wembley Stadium, July 1986 » : {wembley, stadium}),
+    /// sans années, mois ni habillage (« Live; 2013 Remaster » : aucun lieu). Le reste du suffixe (le titre dans
+    /// « Artiste - Titre (Live) ») n'en fait pas partie.
+    /// </summary>
+    private static IEnumerable<string> LivePlace(string segment)
+    {
+        var tokens = Tokens(segment);
+        var live = tokens.IndexOf("live");
+        if (live < 0) return [];
+        return tokens.Skip(live + 1)
+            .Where(t => !t.All(char.IsDigit) && !Noise.Contains(t) && !LiveFiller.Contains(t) && !Months.Contains(t))
+            .Select(t => Words(t).First());
+    }
+
+    private static readonly HashSet<string> Months =
+    [
+        "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november",
+        "december", "janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout", "septembre", "octobre",
+        "novembre", "decembre",
+    ];
 
     /// <summary>Mots d'un suffixe live qui ne disent pas où (« Live at… », « en concert à… »).</summary>
     private static readonly HashSet<string> LiveFiller =
