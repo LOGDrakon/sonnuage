@@ -28,7 +28,7 @@ public sealed class JamSessionTests
 
         await jam.JoinAsync("https://spotify.link/x", JamAudio.RemoteOnly);
         await Until(() => server.Opened >= 2);
-        server.Push(JamStateDto.Inactive);
+        await server.PushAsync(JamStateDto.Inactive);
         await Until(() => ended);
 
         Assert.False(jam.State.Active);
@@ -45,9 +45,9 @@ public sealed class JamSessionTests
         var ended = false;
         jam.Ended += () => ended = true;
 
-        server.Push(Playing(JamAudio.RemoteOnly));
+        await server.PushAsync(Playing(JamAudio.RemoteOnly));
         await Until(() => !fail && server.Opened >= 2);
-        server.Push(JamStateDto.Inactive);
+        await server.PushAsync(JamStateDto.Inactive);
         await Until(() => ended);
     }
 
@@ -100,7 +100,7 @@ public sealed class JamSessionTests
         await jam.JoinAsync("https://spotify.link/x", JamAudio.Guest);
         await Until(() => local.State.Current?.Id == track.Id && local.State.IsPlaying);
 
-        server.Push(Playing(JamAudio.Guest, track, position: 160));
+        await server.PushAsync(Playing(JamAudio.Guest, track, position: 160));
         await Task.Delay(500);
         await local.SeekAsync(0);
         await local.TogglePlayAsync();
@@ -122,9 +122,10 @@ public sealed class JamSessionTests
         await jam.JoinAsync("https://spotify.link/x", JamAudio.Guest);
         await Task.Delay(300);
 
-        server.Push(Playing(JamAudio.Guest, next) with { SourceTrackId = "spotify-2" });
+        await server.PushAsync(Playing(JamAudio.Guest, next) with { SourceTrackId = "spotify-2" });
 
-        await Until(() => local.State.Current?.Id == next.Id, TimeSpan.FromSeconds(2));
+        // Bien avant la fin de la recherche (4 s) : on ne l'a pas attendue.
+        await Until(() => local.State.Current?.Id == next.Id, TimeSpan.FromSeconds(3));
     }
 
     [Fact]
@@ -269,25 +270,31 @@ public sealed class JamSessionTests
     /// <summary>
     /// Le serveur du Jam : « join » rend l'état initial, chaque flux ouvert (prochain de <see cref="Streams"/>, sinon un
     /// flux ordinaire) reçoit les états poussés, « control » est enregistré ou échoue avec <see cref="ControlFails"/>.
+    /// Un état poussé attend qu'un flux soit ouvert : poussé avant, il serait perdu.
     /// </summary>
     private sealed class FakeJamServer(JamStateDto initial) : HttpMessageHandler
     {
-        private Stream? _current;
+        private volatile Stream? _current;
         public Queue<Stream> Streams { get; } = [];
         public int Opened;
         public List<string> Controls { get; } = [];
         public Exception? ControlFails { get; set; }
 
-        public void Push(JamStateDto state) => _current?.Push(state);
+        public async Task PushAsync(JamStateDto state)
+        {
+            await Until(() => _current is not null);
+            _current!.Push(state);
+        }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var path = request.RequestUri!.AbsolutePath.TrimStart('/');
             if (path == SonNuage.Contracts.Jam.StreamRoute)
             {
-                Interlocked.Increment(ref Opened);
                 var stream = Streams.TryDequeue(out var next) ? next : new Stream();
+                // Avant le compte : qui attend « Opened >= n » pousse ensuite sur ce flux-ci, pas sur le précédent.
                 _current = stream;
+                Interlocked.Increment(ref Opened);
                 return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) };
             }
             if (path == SonNuage.Contracts.Jam.ControlRoute)
