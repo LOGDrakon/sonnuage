@@ -74,10 +74,11 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
 
     /// <summary>
     /// Lance l'import YouTube du titre (meilleur résultat sûr) pour le compte, s'il en a le droit (voir
-    /// <see cref="ImportRightAsync"/>). Renvoie l'identifiant de la vidéo mise en file, ou null si l'import est refusé
-    /// ou sans résultat convaincant. Le suivi d'avancement se fait ensuite via <see cref="CheckImportAsync"/>.
+    /// <see cref="ImportRightAsync"/>). Renvoie la vidéo à suivre (et si un import nouveau est parti : une vidéo déjà
+    /// importée ou en cours n'en lance pas), ou null si l'import est refusé ou sans résultat convaincant. Le suivi
+    /// d'avancement se fait ensuite via <see cref="CheckImportAsync"/>.
     /// </summary>
-    public async Task<string?> StartImportAsync(SonNuageDbContext db, Guid userId, JamTrackDto track, CancellationToken ct)
+    public async Task<(string VideoId, bool Queued)?> StartImportAsync(SonNuageDbContext db, Guid userId, JamTrackDto track, CancellationToken ct)
     {
         try
         {
@@ -94,15 +95,16 @@ public sealed class JamResolver(YtDlp ytDlp, YoutubeImporter importer, Microsoft
             Trace(track, "import YouTube", ranked.Count, best is { } p ? $"« {p.Entry.Title} » — {p.Entry.Channel}" : null, null);
             if (best is null) return null;
             var video = ImportVideo(best.Entry, track);
+            var queued = false;
             right = await ImportWithinQuotaAsync(db, userId, video,
-                async () => (await importer.EnqueueAsync(db, [video], albumHint: null, subscriptionId: null, ct)).Queued > 0,
+                async () => queued = (await importer.EnqueueAsync(db, [video], albumHint: null, subscriptionId: null, ct)).Queued > 0,
                 DateTimeOffset.UtcNow, ct);
             if (right != JamImportRight.Allowed)
             {
                 log.LogInformation("Jam : « {Title} » — {Artist} : import refusé au compte ({Right})", track.Title, track.Artist, right);
                 return null;
             }
-            return best.Entry.Id;
+            return (best.Entry.Id, queued);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {

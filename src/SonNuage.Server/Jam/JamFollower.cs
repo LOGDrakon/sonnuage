@@ -28,7 +28,11 @@ public sealed class JamFollower : IAsyncDisposable
     private readonly JamAudio _audio;
     /// <summary>Le compte peut demander des téléchargements (rôle lu au « join ») : sans ce droit, pas d'import serveur.</summary>
     private readonly bool _mayImport;
-    /// <summary>Imports lancés par ce suivi : garde-fou en plus du quota (un hôte qui saute de titre en titre).</summary>
+    /// <summary>
+    /// Imports lancés par ce suivi : garde-fou en plus du quota (un hôte qui saute de titre en titre). Une place est
+    /// réservée avant l'import (les préparations tournent en parallèle) et rendue si rien n'est parti : refus du quota,
+    /// aucun résultat sûr, vidéo déjà importée.
+    /// </summary>
     private int _imports;
     private const int MaxImports = 30;
     private readonly IServiceScopeFactory _scopes;
@@ -499,13 +503,24 @@ public sealed class JamFollower : IAsyncDisposable
                 }
                 // Son chez l'invité : import YouTube pour pouvoir jouer. En « distant seul », inutile.
                 // Pas le droit d'importer, ou trop d'imports pour ce Jam : introuvable ici, l'appareil joue YouTube en direct.
-                if (_audio != JamAudio.Guest || !_mayImport || Interlocked.Increment(ref _imports) > MaxImports)
+                if (_audio != JamAudio.Guest || !_mayImport) { SetPrep(trackId, prep, JamResolve.Unavailable, null); return; }
+                if (Interlocked.Increment(ref _imports) > MaxImports)
                 {
+                    Interlocked.Decrement(ref _imports);
                     SetPrep(trackId, prep, JamResolve.Unavailable, null);
                     return;
                 }
                 // Refus du quota (ou du rôle, relu en base) : null, retenté plus tard comme un import raté.
-                videoId = await resolver.StartImportAsync(db, _userId, wanted, ct);
+                (string VideoId, bool Queued)? started = null;
+                try
+                {
+                    started = await resolver.StartImportAsync(db, _userId, wanted, ct);
+                }
+                finally
+                {
+                    if (started is not { Queued: true }) Interlocked.Decrement(ref _imports);
+                }
+                videoId = started?.VideoId;
             }
             if (videoId is null) { Fail(trackId, prep, RetryLater); return; }
             SetPrep(trackId, prep, JamResolve.Importing, null);
