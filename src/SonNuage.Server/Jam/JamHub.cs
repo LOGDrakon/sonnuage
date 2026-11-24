@@ -54,11 +54,17 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
     private async Task<bool> JoinLockedAsync(Guid userId, string joinToken, JamAudio audio, bool mayImport, CancellationToken ct)
     {
         // L'ancien suivi est retiré sans publier d'état inactif : les appareils le prendraient pour la fin du Jam et
-        // cesseraient de suivre, alors que le nouveau va prendre la suite. Son dernier état est oublié.
-        if (Detach(userId, publishInactive: false) is { } previous) await previous.DisposeAsync();
+        // cesseraient de suivre, alors que le nouveau va prendre la suite. Son dernier état reste ce que reçoit un
+        // appareil qui s'abonne pendant son arrêt (jusqu'à ~5 s pour quitter la session) : le nouveau le remplace dès
+        // qu'il est enregistré. Il n'est pas créé avant : l'ancien, en quittant la session, l'en ferait sortir.
+        if (Detach(userId, publishInactive: false, keepState: true) is { } previous)
+        {
+            await previous.DisposeAsync();
+            if (Replacing is { } replacing) await replacing(userId, previous);
+        }
         JamFollower? follower = null;
         follower = new JamFollower(userId, joinToken, audio, mayImport, scopes, build => PublishFrom(follower, userId, build), Ended, _log);
-        lock (_lock) _followers[userId] = follower;
+        Register(userId, follower);
         bool joined;
         try
         {
@@ -78,6 +84,15 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
         }
         return joined;
     }
+
+    /// <summary>Le suivi devient celui du compte (internal pour les tests).</summary>
+    internal void Register(Guid userId, JamFollower follower)
+    {
+        lock (_lock) _followers[userId] = follower;
+    }
+
+    /// <summary>Pour les tests : appelé quand l'ancien suivi est arrêté, juste avant d'enregistrer le nouveau.</summary>
+    internal Func<Guid, JamFollower, Task>? Replacing { get; set; }
 
     /// <summary>
     /// Le suivi s'est arrêté de lui-même (Jam fini, exclu, connexion perdue pour de bon) : les appareils l'apprennent.
@@ -115,11 +130,12 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
     }
 
     /// <summary>
-    /// Retire le suivi du compte (s'il est <paramref name="only"/>, quand il est donné) et oublie son dernier état ; avec
-    /// <paramref name="publishInactive"/>, les appareils reçoivent l'état inactif dans le même verrou : aucun état
-    /// publié ensuite par ce suivi ne passe plus (il n'est plus celui du compte). Rend le suivi retiré, à arrêter.
+    /// Retire le suivi du compte (s'il est <paramref name="only"/>, quand il est donné) et oublie son dernier état (sauf
+    /// <paramref name="keepState"/>) ; avec <paramref name="publishInactive"/>, les appareils reçoivent l'état inactif
+    /// dans le même verrou : aucun état publié ensuite par ce suivi ne passe plus (il n'est plus celui du compte). Rend
+    /// le suivi retiré, à arrêter.
     /// </summary>
-    private JamFollower? Detach(Guid userId, bool publishInactive, JamFollower? only = null)
+    private JamFollower? Detach(Guid userId, bool publishInactive, JamFollower? only = null, bool keepState = false)
     {
         lock (_lock)
         {
@@ -127,7 +143,7 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
             if (only is null) { if (!_followers.TryRemove(userId, out removed)) removed = null; }
             else removed = _followers.TryRemove(new KeyValuePair<Guid, JamFollower>(userId, only)) ? only : null;
             if (removed is null) return null;
-            _states.TryRemove(userId, out _);
+            if (!keepState) _states.TryRemove(userId, out _);
             if (publishInactive) Publish(userId, JamStateDto.Inactive);
             return removed;
         }
@@ -151,8 +167,11 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
 
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _gates = new();
 
-    public JamStateDto Current(Guid userId) =>
-        _followers.TryGetValue(userId, out var f) ? f.Current() : JamStateDto.Inactive;
+    /// <summary>État du compte : celui de son suivi, sinon le dernier publié (ancien suivi en cours de remplacement).</summary>
+    public JamStateDto Current(Guid userId)
+    {
+        lock (_lock) return _followers.TryGetValue(userId, out var f) ? f.Current() : _states.GetValueOrDefault(userId, JamStateDto.Inactive);
+    }
 
     /// <summary>Abonne un appareil au flux d'état du compte. L'état courant est livré tout de suite.</summary>
     public (ChannelReader<string> Reader, IDisposable Lease) Subscribe(Guid userId)
@@ -164,7 +183,7 @@ public sealed class JamHub(IServiceScopeFactory scopes, ILoggerFactory logs) : I
             _subscribers.GetOrAdd(userId, _ => new())[id] = channel;
             // État recalculé maintenant (pas le dernier publié) : son AsOfUnixMs sert à l'appareil d'horloge de référence.
             // Dans le verrou : aucune publication ne peut s'intercaler et arriver avant cet état plus ancien.
-            channel.Writer.TryWrite(Serialize(_followers.TryGetValue(userId, out var f) ? f.Current() : _states.GetValueOrDefault(userId, JamStateDto.Inactive)));
+            channel.Writer.TryWrite(Serialize(Current(userId)));
         }
         return (channel.Reader, new Lease(() =>
         {

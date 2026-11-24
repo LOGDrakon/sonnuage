@@ -605,6 +605,39 @@ public sealed class JamApiTests(SonNuageFactory factory) : IClassFixture<SonNuag
         }
     }
 
+    [Fact]
+    public async Task A_device_reconnecting_during_a_rejoin_still_sees_the_jam()
+    {
+        // Pendant l'arrêt de l'ancien suivi (jusqu'à ~5 s), un appareil qui se réabonnait recevait l'état inactif et
+        // cessait de suivre pour de bon, alors que le nouveau suivi allait prendre la suite.
+        var hub = factory.Services.GetRequiredService<JamHub>();
+        var userId = Guid.NewGuid();
+        var old = new JamFollower(userId, "3t2Yn4EKMk4APNPw22vlZg", JamAudio.Guest, mayImport: false,
+            factory.Services.GetRequiredService<IServiceScopeFactory>(), _ => { }, _ => { },
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        Assert.False(await old.Joined.WaitAsync(Ct)); // sans jeton : arrêté aussitôt, mais encore le suivi du compte
+        hub.Register(userId, old);
+        hub.Publish(userId, JamStateDto.Inactive with { Active = true, HostName = "Ancien hôte" });
+        JamStateDto? during = null;
+        hub.Replacing = (id, _) =>
+        {
+            if (id != userId) return Task.CompletedTask;
+            var (reader, lease) = hub.Subscribe(userId);
+            using (lease)
+                if (reader.TryRead(out var json)) during = System.Text.Json.JsonSerializer.Deserialize<JamStateDto>(json, JsonWeb);
+            return Task.CompletedTask;
+        };
+        try
+        {
+            await hub.JoinAsync(userId, "3t2Yn4EKMk4APNPw22vlZg", JamAudio.Guest, mayImport: false, Ct);
+        }
+        finally
+        {
+            hub.Replacing = null;
+        }
+        Assert.True(during?.Active);
+    }
+
     private static readonly System.Text.Json.JsonSerializerOptions JsonWeb = new(System.Text.Json.JsonSerializerDefaults.Web);
 
     [Fact]
