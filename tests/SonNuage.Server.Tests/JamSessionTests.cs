@@ -151,6 +151,30 @@ public sealed class JamSessionTests
     }
 
     [Fact]
+    public async Task Sound_cut_during_a_track_change_does_not_start_the_new_track()
+    {
+        // Casque débranché pendant la recherche YouTube du nouveau titre : quand elle aboutit, rien ne démarre ici.
+        var found = new TaskCompletionSource();
+        var youtube = new YoutubeDirectTests.FakeYoutube { Song = ("Host song", "Host artist", "3:20"), SearchGate = found.Task };
+        var local = new FakePlayer();
+        var server = new FakeJamServer(Playing(JamAudio.Guest));
+        using var jam = await SessionAsync(server, local, youtube);
+        IPlayerRoute route = jam;
+        await jam.JoinAsync("https://spotify.link/x", JamAudio.Guest);
+        await Until(() => youtube.Queries.Count > 0);
+        await Task.Delay(500); // la synchro attend maintenant la recherche, sans repasser par son début
+
+        route.HoldLocalAudio();
+        found.SetResult();
+        await Until(() => youtube.Players > 0);
+        await Task.Delay(500);
+        Assert.False(local.State.IsPlaying);
+
+        await route.TogglePlayAsync();
+        await Until(() => local.State.IsPlaying);
+    }
+
+    [Fact]
     public async Task A_pause_while_the_sound_is_held_still_goes_to_the_host()
     {
         var track = Library("Song");

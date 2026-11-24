@@ -24,7 +24,9 @@ public sealed class YoutubeDirectTests
 
     private static JamTrackDto Host(string title, double seconds) => new(title, "Artist", null, seconds, null);
 
-    private static JsonNode Titled(params (string Id, string Title, string Duration)[] songs)
+    private static JsonNode Titled(params (string Id, string Title, string Duration)[] songs) => Titled("Artist", songs);
+
+    private static JsonNode Titled(string artist, params (string Id, string Title, string Duration)[] songs)
     {
         var items = new JsonArray();
         foreach (var (id, title, duration) in songs)
@@ -41,7 +43,7 @@ public sealed class YoutubeDirectTests
                 ["musicResponsiveListItemRenderer"] = new JsonObject
                 {
                     ["playlistItemData"] = new JsonObject { ["videoId"] = id },
-                    ["flexColumns"] = new JsonArray(Column(title), Column("Artist", " • ", "Album", " • ", duration)),
+                    ["flexColumns"] = new JsonArray(Column(title), Column(artist, " • ", "Album", " • ", duration)),
                 },
             });
         }
@@ -197,10 +199,13 @@ public sealed class YoutubeDirectTests
 
     /// <summary>
     /// YouTube : un visiteur, une recherche (« studio » à 3:04, ou une erreur pour <see cref="FailQuery"/>) et un
-    /// lecteur (flux opus, ou un refus de raison <see cref="Refusal"/>).
+    /// lecteur (flux opus, ou un refus de raison <see cref="Refusal"/>). <see cref="Song"/> remplace le résultat, et la
+    /// recherche attend <see cref="SearchGate"/> s'il est donné.
     /// </summary>
-    private sealed class FakeYoutube : HttpMessageHandler
+    internal sealed class FakeYoutube : HttpMessageHandler
     {
+        public (string Title, string Artist, string Duration)? Song { get; init; }
+        public Task? SearchGate { get; init; }
         public string? FailQuery { get; init; }
         public string? Refusal { get; init; }
         public List<string> Queries { get; } = [];
@@ -221,7 +226,8 @@ public sealed class YoutubeDirectTests
                 var query = body["query"]!.GetValue<string>();
                 Queries.Add(query);
                 if (query == FailQuery) return new HttpResponseMessage(HttpStatusCode.InternalServerError);
-                return Json(Songs(("studio", "3:04")).ToJsonString());
+                if (SearchGate is { } gate) await gate.WaitAsync(ct);
+                return Json((Song is { } song ? Titled(song.Artist, ("studio", song.Title, song.Duration)) : Songs(("studio", "3:04"))).ToJsonString());
             }
             Players++;
             return Json(Refusal is { } reason

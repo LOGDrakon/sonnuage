@@ -577,6 +577,9 @@ public sealed class JamSession : IDisposable, IPlayerRoute
 
     private async Task StartAsync(JamStateDto state, string source, TrackDto track)
     {
+        // Son coupé par le système pendant la recherche du titre (casque débranché) : rien ne démarre ici. Le titre
+        // n'est pas retenu comme lancé, la reprise le relancera à la position de l'hôte.
+        if (_held) return;
         _playingSource = source;
         _playing = track;
         _lastSeekTarget = double.NaN;
@@ -592,6 +595,7 @@ public sealed class JamSession : IDisposable, IPlayerRoute
         else if (at >= 0)
         {
             // Pré-chargé dans la file : on y saute (déjà en mémoire tampon, démarrage immédiat).
+            if (Unstarted()) return;
             await _player.JumpToAsync(at);
             if (HostPosition(state) < EndOf(state, track) - EndSeconds) await SeekAsync(HostPosition(state), cold: false);
         }
@@ -606,12 +610,22 @@ public sealed class JamSession : IDisposable, IPlayerRoute
             // Nouveau titre : chargé directement à la position de l'hôte (une seule requête, pas « 0 puis saut »),
             // plus l'avance de démarrage apprise.
             var target = Math.Max(0, HostPosition(state) + _coldLeadSeconds);
+            if (Unstarted()) return;
             _lastSeekCold = true;
             _lastSeekAtMs = NowMs;
             _lastSeekTarget = target;
             await _player.PlayAtAsync([track, .. state.Upcoming ?? []], 0, target);
         }
         if (!state.IsPlaying && _player.State.IsPlaying) await _player.TogglePlayAsync();
+
+        // Retenue arrivée entre-temps (pendant le changement de vitesse) : le titre n'est pas lancé.
+        bool Unstarted()
+        {
+            if (!_held) return false;
+            _playingSource = null;
+            _playing = null;
+            return true;
+        }
     }
 
     /// <summary>Recale le lecteur, en visant où sera l'hôte quand le lecteur aura repris.</summary>
