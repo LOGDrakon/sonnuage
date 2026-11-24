@@ -282,6 +282,12 @@ public sealed class JamFollower : IAsyncDisposable
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
         }
+        catch (Exception ex)
+        {
+            // Envoi raté après l'arrêt de la boucle (connexion fermée, verrou d'envoi libéré…) : rien ne doit remonter
+            // jusqu'au « await keepalive » de PumpAsync, qui ferait échouer la connexion au lieu de la terminer.
+            if (!ct.IsCancellationRequested) _log.LogWarning(ex, "Jam : keepalive du dealer arrêté");
+        }
     }
 
     private const string Ping = "{\"type\":\"ping\"}";
